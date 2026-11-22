@@ -1,0 +1,110 @@
+import argparse
+import json
+from collections import deque
+from contextlib import contextmanager
+from itertools import islice
+from io import BytesIO
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+
+from PIL import Image
+
+ROOT = Path(__file__).resolve().parents[2]
+IMAGE_SIZE = {"shortest_edge": 4 * 32 * 32, "longest_edge": 1800 * 32 * 32}
+EMBEDDING_SCHEMA = 1
+
+
+def positive_int(value):
+    value = int(value)
+    if value < 1:
+        raise argparse.ArgumentTypeError("expected a positive integer")
+    return value
+
+
+def parser(description):
+    from common.dataset import DATASETS
+
+    cli = argparse.ArgumentParser(description=description)
+    cli.add_argument("--dataset-name", choices=DATASETS, default="mmdocir")
+    cli.add_argument("--dataset", type=Path, help="Override the dataset directory")
+    cli.add_argument("--output", type=Path, default=ROOT / "output")
+    cli.add_argument("--limit", type=positive_int, help="Only process the first N queries")
+    return cli
+
+
+def local_options(cli):
+    cli.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto")
+    cli.add_argument("--batch-size", type=positive_int, default=2)
+
+
+def local_device(device):
+    import torch
+
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA unavailable. Install a CUDA PyTorch build or select --device cpu.")
+    dtype = torch.bfloat16
+    if device == "cuda" and not torch.cuda.is_bf16_supported():
+        dtype = torch.float16
+    return torch.device(device), dtype
+
+
+def open_rgb(binary):
+    with Image.open(BytesIO(binary)) as image:
+        return image.convert("RGB")
+
+
+def read_jsonl(path):
+    with path.open(encoding="utf-8-sig") as stream:
+        return [json.loads(line) for line in stream if line.strip()]
+
+
+@contextmanager
+def atomic_output(path, mode="w", **kwargs):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile(mode=mode, dir=path.parent, delete=False, **kwargs) as stream:
+        pending = Path(stream.name)
+        try:
+            yield stream
+            stream.close()
+            pending.replace(path)
+        finally:
+            stream.close()
+            pending.unlink(missing_ok=True)
+
+
+def write_json(path, value, *, jsonl=False):
+    with atomic_output(path, encoding="utf-8") as stream:
+        if jsonl:
+            for row in value:
+                stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
+        else:
+            json.dump(value, stream, ensure_ascii=False, indent=2, allow_nan=False)
+            stream.write("\n")
+
+
+def parallel_map(executor, function, items, buffer_size):
+    """Preserve input order and limit the number of items retained in memory."""
+    items = iter(items)
+    pending = deque(executor.submit(function, item) for item in islice(items, buffer_size))
+    while pending:
+        yield pending.popleft().result()
+        pending.extend(executor.submit(function, item) for item in islice(items, 1))
+
+
+def file_stamp(path):
+    stat = path.stat()
+    return [str(path.resolve()), stat.st_size, stat.st_mtime_ns]
+
+
+def embeddings_path(args):
+    return args.embeddings or retrieval_dir(args) / "encode" / "embeddings.npz"
+
+
+def embedding_folder(model_name):
+    return "Qwen3VLEmb8B" if model_name == "Qwen3-VL-Embedding-8B" else model_name
+
+
+def retrieval_dir(args):
+    return args.output / "retriever" / args.dataset_name / embedding_folder(args.embedding_model_name)
