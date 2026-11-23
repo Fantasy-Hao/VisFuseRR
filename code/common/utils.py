@@ -2,8 +2,9 @@ import argparse
 import json
 from collections import deque
 from contextlib import contextmanager
-from itertools import islice
+from itertools import groupby, islice
 from io import BytesIO
+from math import isfinite
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
@@ -22,13 +23,11 @@ def positive_int(value):
 
 
 def parser(description):
-    from common.dataset import DATASETS
+    from common.dataset import dataset_options
 
     cli = argparse.ArgumentParser(description=description)
-    cli.add_argument("--dataset-name", choices=DATASETS, default="mmdocir")
-    cli.add_argument("--dataset", type=Path, help="Override the dataset directory")
+    dataset_options(cli)
     cli.add_argument("--output", type=Path, default=ROOT / "output")
-    cli.add_argument("--limit", type=positive_int, help="Only process the first N queries")
     return cli
 
 
@@ -53,6 +52,46 @@ def local_device(device):
 def open_rgb(binary):
     with Image.open(BytesIO(binary)) as image:
         return image.convert("RGB")
+
+
+def normalize_box(box, page_size):
+    if (
+        not isinstance(box, (list, tuple)) or len(box) != 4
+        or not isinstance(page_size, (list, tuple)) or len(page_size) != 2
+        or not all(type(value) in (int, float) and isfinite(value) for value in (*box, *page_size))
+    ):
+        return None
+    x1, y1, x2, y2 = box
+    width, height = page_size
+    if not (0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height):
+        return None
+    normalized = tuple(round(value / side * 1000) for value, side in zip(box, (width, height, width, height)))
+    if normalized[0] < normalized[2] and normalized[1] < normalized[3]:
+        return normalized
+    return None
+
+
+def candidate_span(query):
+    start, end = query["cand_span"]
+    return range(start, end + 1)
+
+
+def group_candidates(queries):
+    by_span = sorted(queries, key=lambda query: query["cand_span"])
+    for _, group in groupby(by_span, key=lambda query: query["cand_span"]):
+        yield list(group)
+
+
+def rerank_document_inputs(images, queries, rankings):
+    """Read each selected page once, retaining the images of one document at a time."""
+    source = images({uid for ids in rankings.values() for uid in ids})
+    for group in group_candidates(queries):
+        ids = {uid for query in group for uid in rankings[query["qid"]]}
+        by_id = dict(islice(source, len(ids)))
+        if by_id.keys() != ids:
+            raise ValueError("Candidate images do not match document pages")
+        for query in group:
+            yield query, [by_id[uid] for uid in rankings[query["qid"]]]
 
 
 def read_jsonl(path):
@@ -107,4 +146,13 @@ def embedding_folder(model_name):
 
 
 def retrieval_dir(args):
-    return args.output / "retriever" / args.dataset_name / embedding_folder(args.embedding_model_name)
+    return args.output / "retriever" / dataset_folder(args) / embedding_folder(args.embedding_model_name)
+
+
+def dataset_folder(args):
+    folder = Path(args.dataset_name)
+    if args.dataset_name == "docscope":
+        return folder / (args.split or "test")
+    if args.dataset_name == "vidore_v3":
+        return folder / (args.subset or "all") / (args.language or "native")
+    return folder

@@ -4,8 +4,8 @@ from zipfile import BadZipFile
 
 import numpy as np
 
-from common.dataset import open_dataset
-from common.utils import EMBEDDING_SCHEMA, embeddings_path, parser, positive_int, retrieval_dir, write_json
+from common.dataset import dataset_from_args
+from common.utils import EMBEDDING_SCHEMA, embeddings_path, group_candidates, parser, positive_int, retrieval_dir, write_json
 from retriever.fusion import IMAGE_WEIGHT, fuse, fusion_inputs
 from retriever.metrics import evaluate
 from retriever.model import DEFAULT_EMBEDDER, EMBEDDERS
@@ -59,43 +59,55 @@ def load_embeddings(path, dataset, model_name):
     return dict(zip(query_ids, queries)), {uid: i for i, uid in enumerate(page_ids)}, texts, images
 
 
-def search(args):
-    dataset = open_dataset(args.dataset_name, args.dataset)
-    queries, _ = dataset.load(args.limit)
-    path = embeddings_path(args)
-    if not path.exists() and args.embeddings is None and args.embedding_model_name == DEFAULT_EMBEDDER:
-        legacy_path = args.output / "retriever" / args.dataset_name / "embeddings.npz"
-        if legacy_path.is_file():
-            path = legacy_path
-    query_vectors, page_index, text_vectors, image_vectors = load_embeddings(path, dataset, args.embedding_model_name)
-    rows = []
-    for query in queries:
-        pids = np.asarray(list(dataset.candidate_ids(query)))
+def score_queries(dataset, queries, embeddings, fusion):
+    query_vectors, page_index, text_vectors, image_vectors = embeddings
+    for group in group_candidates(queries):
+        pids = np.asarray(dataset.candidate_ids(group[0]))
         try:
-            vector = query_vectors[query["qid"]]
             indices = [page_index[uid] for uid in pids]
+            vectors = np.stack([query_vectors[query["qid"]] for query in group])
         except KeyError as error:
             raise ValueError(
                 "The archive does not cover this selection. Run code/retriever/run_encode.sh with a larger --limit."
             ) from error
-        text = text_vectors[indices] @ vector
-        image = image_vectors[indices] @ vector
-        text_fusion, image_fusion = fusion_inputs(text, image, args.fusion)
-        rows.append((pids, text, image, text_fusion, image_fusion))
+        page_texts, page_images = text_vectors[indices], image_vectors[indices]
+        batch_size = 64
+        for start in range(0, len(group), batch_size):
+            end = start + batch_size
+            text_scores = vectors[start:end] @ page_texts.T
+            image_scores = vectors[start:end] @ page_images.T
+            for query, text, image in zip(group[start:end], text_scores, image_scores):
+                text_fusion, image_fusion = fusion_inputs(text, image, fusion)
+                yield query, pids, text, image, text_fusion, image_fusion
+
+
+def search(args):
+    dataset = dataset_from_args(args)
+    queries, _ = dataset.load(args.limit)
+    path = embeddings_path(args)
+    if (
+        not path.exists() and args.dataset_name == "mmdocir" and args.embeddings is None
+        and args.embedding_model_name == DEFAULT_EMBEDDER
+    ):
+        legacy_path = args.output / "retriever" / args.dataset_name / "embeddings.npz"
+        if legacy_path.is_file():
+            path = legacy_path
+    embeddings = load_embeddings(path, dataset, args.embedding_model_name)
 
     dest = retrieval_dir(args) / "retrieval"
     alpha = IMAGE_WEIGHT
     if args.grid_search:
         grid_rows = [
             (pids, text, image, np.isin(pids, query["gt_pages"]), len(query["gt_pages"]))
-            for query, (pids, _, _, text, image) in zip(queries, rows)
+            for query, pids, _, _, text, image in score_queries(dataset, queries, embeddings, args.fusion)
         ]
         alpha, trials = grid_search(grid_rows)
+        del grid_rows
         write_json(dest / "gridsearch.json", {"fusion": args.fusion, "best_alpha": alpha, "trials": trials})
         print(f"Grid search: best image weight={alpha:.2f}")
 
-    candidates, rankings = [], {}
-    for query, (pids, text, image, text_fusion, image_fusion) in zip(queries, rows):
+    candidates, rankings = {}, {}
+    for query, pids, text, image, text_fusion, image_fusion in score_queries(dataset, queries, embeddings, args.fusion):
         scores = fuse(text_fusion, image_fusion, alpha)
         order = rank(scores, pids, args.topk)
         selected = [
@@ -105,13 +117,13 @@ def search(args):
             }
             for rank, i in enumerate(order, 1)
         ]
-        candidates.append({
-            **{key: value for key, value in query.items() if key != "gt_pages"},
+        candidates[query["qid"]] = {
+            **{key: value for key, value in query.items() if not key.startswith("gt_")},
             "alpha": alpha, "candidates": selected,
-        })
+        }
         rankings[query["qid"]] = [candidate["page_uid"] for candidate in selected]
 
-    write_json(dest / "topk_candidates.jsonl", candidates, jsonl=True)
+    write_json(dest / "topk_candidates.jsonl", (candidates[query["qid"]] for query in queries), jsonl=True)
     metrics = evaluate(queries, rankings)
     write_json(dest / "metrics_retrieval.json", metrics)
     print(f"Retrieved {len(queries)} queries. Recall@5={metrics['micro']['Recall@5']:.4f}")

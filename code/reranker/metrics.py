@@ -30,10 +30,18 @@ def evaluate_localization(queries, results):
     results_by_query = {row["qid"]: row for row in results}
     pages = []
     predicted_areas, gt_areas = [], []
+    n_gt_pages = n_facts = covered_facts = 0
     for query in queries:
         qid = query["qid"]
         result = results_by_query[qid]
         predictions = {row["page_uid"]: row["evidence_boxes"] for row in result.get("evidence", [])}
+        n_gt_pages += len(query["gt_boxes"])
+        for alternatives in query.get("gt_facts", []):
+            n_facts += 1
+            covered_facts += any(
+                best_overlap(predictions.get(uid, []), [box])[0] >= 0.5
+                for uid, box in alternatives
+            )
         for uid in result["ranking"]:
             truth = query["gt_boxes"].get(uid)
             if not truth:
@@ -51,14 +59,19 @@ def evaluate_localization(queries, results):
     with_predictions = sum(page["n_predicted_boxes"] > 0 for page in pages)
     mean_prediction = mean(predicted_areas) if predicted_areas else None
     mean_gt = mean(gt_areas) if gt_areas else None
+    matched = sum(page["best_iou"] >= 0.5 for page in pages)
     return {
         "n_pages": n,
+        "n_gt_pages": n_gt_pages,
         "n_pages_with_predictions": with_predictions,
         "n_predicted_boxes": len(predicted_areas),
         "n_gt_boxes": len(gt_areas),
         "mean_iou": mean(page["best_iou"] for page in pages) if n else None,
         "IoU@0.3": mean(page["best_iou"] >= 0.3 for page in pages) if n else None,
-        "IoU@0.5": mean(page["best_iou"] >= 0.5 for page in pages) if n else None,
+        "IoU@0.5": matched / n if n else None,
+        "end_to_end_IoU@0.5": matched / n_gt_pages if n_gt_pages else None,
+        "n_gt_facts": n_facts,
+        "fact_coverage@0.5": covered_facts / n_facts if n_facts else None,
         "mean_containment": mean(page["best_containment"] for page in pages) if n else None,
         "containment@0.5": mean(page["best_containment"] >= 0.5 for page in pages) if n else None,
         "containment@0.8": mean(page["best_containment"] >= 0.8 for page in pages) if n else None,

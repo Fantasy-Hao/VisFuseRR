@@ -3,8 +3,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote
 
-from common.dataset import open_dataset
-from common.utils import embedding_folder, parallel_map, parser, positive_int, read_jsonl, retrieval_dir, write_json
+from common.dataset import dataset_from_args
+from common.utils import dataset_folder, embedding_folder, parallel_map, parser, positive_int, read_jsonl, retrieval_dir, write_json
 from reranker.metrics import evaluate, evaluate_localization
 from retriever.model import DEFAULT_EMBEDDER, EMBEDDERS
 
@@ -29,7 +29,7 @@ def candidate_rankings(dataset, queries, path, topk):
         row = candidates.get(qid)
         if row is None or any(
             row.get(key) != value for key, value in query.items()
-            if key not in ("gt_pages", "gt_boxes") and (key != "content_type" or key in row)
+            if not key.startswith("gt_") and (key != "content_type" or key in row)
         ):
             raise ValueError(f"Retrieval candidates do not match query {qid}. Run retrieval first.")
         ids = [candidate["page_uid"] for candidate in row["candidates"][:topk]]
@@ -46,11 +46,14 @@ def rerank(
     args, rank_pages, *, method, model_name, variant=None,
     include_ocr=False, include_images=True, workers=1,
 ):
-    dataset = open_dataset(args.dataset_name, args.dataset)
-    localize = method == "listwise"
+    dataset = dataset_from_args(args)
+    localize = method == "listwise" and include_images
     queries, texts = dataset.load(args.limit, include_ocr=include_ocr, include_layouts=localize)
     path = args.candidates or retrieval_dir(args) / "retrieval" / "topk_candidates.jsonl"
-    if not path.exists() and args.candidates is None and args.embedding_model_name == DEFAULT_EMBEDDER:
+    if (
+        not path.exists() and args.dataset_name == "mmdocir" and args.candidates is None
+        and args.embedding_model_name == DEFAULT_EMBEDDER
+    ):
         legacy_path = args.output / "retriever" / "topk_candidates.jsonl"
         if legacy_path.is_file():
             path = legacy_path
@@ -88,7 +91,7 @@ def rerank(
     model_folder = quote(model_name, safe="")
     if model_folder in (".", ".."):
         raise ValueError("Invalid reranker model name")
-    dest = args.output / "reranker" / args.dataset_name / embedding_folder(args.embedding_model_name)
+    dest = args.output / "reranker" / dataset_folder(args) / embedding_folder(args.embedding_model_name)
     dest = dest / "rerank" / method / model_folder
     if variant is not None:
         dest = dest / variant

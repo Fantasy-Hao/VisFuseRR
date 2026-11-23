@@ -6,9 +6,9 @@ from zipfile import BadZipFile
 
 import numpy as np
 
-from common.dataset import open_dataset
+from common.dataset import dataset_from_args
 from common.utils import (
-    EMBEDDING_SCHEMA, ROOT, atomic_output, embeddings_path, file_stamp,
+    EMBEDDING_SCHEMA, ROOT, atomic_output, embeddings_path, file_stamp, group_candidates,
     local_options, open_rgb, parallel_map, parser, positive_int,
 )
 from retriever.model import DEFAULT_EMBEDDER, EMBEDDERS
@@ -35,10 +35,10 @@ def encode_items(model, items, batch_size, role, label, count):
 
 
 def encode(args):
-    dataset = open_dataset(args.dataset_name, args.dataset)
+    dataset = dataset_from_args(args)
     queries, texts = dataset.load(args.limit, include_ocr=True)
     query_ids = [query["qid"] for query in queries]
-    page_ids = sorted({uid for query in queries for uid in dataset.candidate_ids(query)})
+    page_ids = sorted({uid for group in group_candidates(queries) for uid in dataset.candidate_ids(group[0])})
     path = embeddings_path(args)
     model_path = args.embedding_model or ROOT / "model" / args.embedding_model_name
     model_class = EMBEDDERS[args.embedding_model_name]

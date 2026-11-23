@@ -5,23 +5,27 @@ from statistics import mean
 KS = (1, 3, 5, 10)
 
 
-def query_metrics(ranking, relevant_pages, ks=KS):
+def query_metrics(ranking, relevant_pages, ks=KS, *, relevance=None):
     relevant = set(relevant_pages)
     if not relevant:
         raise ValueError("A query must have at least one ground-truth page")
     if len(set(ranking)) != len(ranking):
         raise ValueError("Duplicate page identifiers in a ranking")
 
+    gains = relevance if relevance is not None else dict.fromkeys(relevant, 1)
+    ideal_gains = sorted(gains.values(), reverse=True)
     metrics = {}
     for k in ks:
         retrieved = ranking[:k]
         hit_ranks = [rank for rank, uid in enumerate(retrieved, 1) if uid in relevant]
         ideal_hits = min(k, len(relevant))
-        dcg = sum(1 / math.log2(rank + 1) for rank in hit_ranks)
-        ideal_dcg = sum(1 / math.log2(rank + 1) for rank in range(1, ideal_hits + 1))
+        dcg = sum(gains[retrieved[rank - 1]] / math.log2(rank + 1) for rank in hit_ranks)
+        ideal_dcg = sum(gain / math.log2(rank + 1) for rank, gain in enumerate(ideal_gains[:k], 1))
         precision_sum = sum(hits / rank for hits, rank in enumerate(hit_ranks, 1))
         metrics.update({
             f"Recall@{k}": len(hit_ranks) / len(relevant),
+            f"RecallAll@{k}": int(len(hit_ranks) == len(relevant)),
+            f"Hit@{k}": int(bool(hit_ranks)),
             f"Precision@{k}": len(hit_ranks) / len(retrieved) if retrieved else 0,
             f"NDCG@{k}": dcg / ideal_dcg,
             f"MAP@{k}": precision_sum / ideal_hits,
@@ -35,7 +39,7 @@ def evaluate(queries, rankings, ks=KS):
     domains = defaultdict(list)
     for query in queries:
         qid, group = query["qid"], query["group"]
-        metrics = query_metrics(rankings[qid], query["gt_pages"], ks)
+        metrics = query_metrics(rankings[qid], query["gt_pages"], ks, relevance=query.get("gt_relevance"))
         rows.append({"qid": qid, "group": group, **metrics})
         domains[group].append(metrics)
     if not rows:
