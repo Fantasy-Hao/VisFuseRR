@@ -31,8 +31,16 @@ class DocScope:
             raise ValueError(f"No answerable DocScope queries in split {split}")
         self.documents = {}
 
-    def pdf_path(self, doc_id):
-        return self.pdf_dir / f"{doc_id.removesuffix('.pdf')}.pdf"
+    def open_pdf(self, doc_id):
+        document = pymupdf.open(self.pdf_dir / f"{doc_id.removesuffix('.pdf')}.pdf")
+        catalog = document.pdf_catalog()
+        if (
+            document.xref_get_key(catalog, "OCProperties/OCGs")[0] == "array"
+            and document.xref_get_key(catalog, "OCProperties/D")[0] == "null"
+        ):
+            # Match MuPDF's fallback for missing layer configuration.
+            document.xref_set_key(catalog, "OCProperties/D", "<< /BaseState /ON >>")
+        return document
 
     def load(self, limit=None, *, include_ocr=False, include_layouts=False):
         docs = defaultdict(list)
@@ -45,7 +53,7 @@ class DocScope:
         documents = {}
         start = 0
         for doc_id, items in docs.items():
-            with pymupdf.open(self.pdf_path(doc_id)) as document:
+            with self.open_pdf(doc_id) as document:
                 end = start + len(document)
                 dimensions = {}
                 for qid, item in items:
@@ -100,7 +108,7 @@ class DocScope:
         for doc_id, (start, end) in self.documents.items():
             selected = sorted(pending.intersection(range(start, end)))
             if selected:
-                with pymupdf.open(self.pdf_path(doc_id)) as document:
+                with self.open_pdf(doc_id) as document:
                     for uid in selected:
                         image = document[uid - start].get_pixmap(dpi=RENDER_DPI, alpha=False, annots=False)
                         yield uid, image.tobytes("jpeg", jpg_quality=90)
