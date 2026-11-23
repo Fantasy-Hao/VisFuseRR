@@ -1,4 +1,4 @@
-from common.utils import IMAGE_SIZE, local_device
+from utils import IMAGE_SIZE, local_device
 
 # https://github.com/QwenLM/Qwen3-VL-Embedding/blob/main/src/models/qwen3_vl_reranker.py
 SYSTEM_PROMPT = (
@@ -11,9 +11,6 @@ MAX_LENGTH = 10240
 
 class Qwen3VLReranker:
     def __init__(self, model_path, device):
-        if not model_path.is_dir():
-            raise FileNotFoundError(f"Local reranker model directory not found: {model_path}")
-
         import torch
         from transformers import Qwen3VLForConditionalGeneration, Qwen3VLProcessor
 
@@ -63,9 +60,6 @@ class Qwen3VLReranker:
 
 class JinaRerankerM0:
     def __init__(self, model_path, device):
-        if not model_path.is_dir():
-            raise FileNotFoundError(f"Local reranker model directory not found: {model_path}")
-
         from transformers import AutoModel, AutoProcessor
 
         device, dtype = local_device(device)
@@ -90,6 +84,6 @@ class JinaRerankerM0:
 
 DEFAULT_RERANKER = "Qwen3-VL-Reranker-8B"
 RERANKERS = {
-    DEFAULT_RERANKER: Qwen3VLReranker, 
-    "jina-reranker-m0": JinaRerankerM0
+    DEFAULT_RERANKER: Qwen3VLReranker,
+    "jina-reranker-m0": JinaRerankerM0,
 }

@@ -3,8 +3,11 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote
 
-from common.dataset import dataset_from_args
-from common.utils import dataset_folder, embedding_folder, parallel_map, parser, positive_int, read_jsonl, retrieval_dir, write_json
+from dataset import dataset_from_args, parser
+from utils import (
+    dataset_folder, embedding_folder, parallel_map,
+    positive_int, read_jsonl, retrieval_dir, write_json,
+)
 from reranker.metrics import evaluate, evaluate_localization
 from retriever.model import DEFAULT_EMBEDDER, EMBEDDERS
 
@@ -18,19 +21,12 @@ def rerank_parser(description):
 
 
 def candidate_rankings(dataset, queries, path, topk):
-    rows = read_jsonl(path)
-    candidates = {row["qid"]: row for row in rows}
-    if len(candidates) != len(rows):
-        raise ValueError("Duplicate query IDs in retrieval output")
-
+    candidates = {row["qid"]: row for row in read_jsonl(path)}
     rankings = {}
     for query in queries:
         qid = query["qid"]
-        row = candidates.get(qid)
-        if row is None or any(
-            row.get(key) != value for key, value in query.items()
-            if not key.startswith("gt_") and (key != "content_type" or key in row)
-        ):
+        row = candidates[qid]
+        if row["query"] != query["query"] or row["cand_span"] != query["cand_span"]:
             raise ValueError(f"Retrieval candidates do not match query {qid}. Run retrieval first.")
         ids = [candidate["page_uid"] for candidate in row["candidates"][:topk]]
         allowed = dataset.candidate_ids(query)
@@ -42,67 +38,46 @@ def candidate_rankings(dataset, queries, path, topk):
     return rankings
 
 
-def rerank(
-    args, rank_pages, *, method, model_name, variant=None,
-    include_ocr=False, include_images=True, workers=1,
-):
+def rerank(args, rank_pages, *, method, model_name, workers=1):
     dataset = dataset_from_args(args)
-    localize = method == "listwise" and include_images
-    queries, texts = dataset.load(args.limit, include_ocr=include_ocr, include_layouts=localize)
+    listwise = method == "listwise"
+    queries, texts = dataset.load(args.limit, include_ocr=listwise, include_layouts=listwise)
     path = args.candidates or retrieval_dir(args) / "retrieval" / "topk_candidates.jsonl"
-    if (
-        not path.exists() and args.dataset_name == "mmdocir" and args.candidates is None
-        and args.embedding_model_name == DEFAULT_EMBEDDER
-    ):
-        legacy_path = args.output / "retriever" / "topk_candidates.jsonl"
-        if legacy_path.is_file():
-            path = legacy_path
     before = candidate_rankings(dataset, queries, path, args.topk)
 
     def rank_query(item):
         query, images = item
         qid = query["qid"]
         ids = before[qid]
-        page_texts = [texts[uid] for uid in ids] if include_ocr else None
-        try:
-            result = rank_pages(query["query"], ids, images, page_texts)
-        except (ValueError, RuntimeError) as error:
-            raise RuntimeError(f"Reranking failed for query {qid}: {error}") from error
+        page_texts = [texts[uid] for uid in ids] if listwise else None
+        result = rank_pages(query["query"], ids, images, page_texts)
         return {"qid": qid, **result}
 
-    def collect(rows):
-        results = []
-        for result in rows:
-            results.append(result)
-            if len(results) % 20 == 0 or len(results) == len(queries):
-                print(f"Reranked {len(results)}/{len(queries)} queries", flush=True)
-        return results
-
-    inputs = dataset.rerank_inputs(queries, before) if include_images else ((query, None) for query in queries)
+    inputs = dataset.rerank_inputs(queries, before)
     if workers == 1:
-        results = collect(map(rank_query, inputs))
+        results = list(map(rank_query, inputs))
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            results = collect(parallel_map(executor, rank_query, inputs, workers))
+            results = list(parallel_map(executor, rank_query, inputs, workers))
 
     results.sort(key=lambda row: row["qid"])
     metrics = evaluate(queries, before, results)
-    localization = evaluate_localization(queries, results) if localize else None
     model_folder = quote(model_name, safe="")
     if model_folder in (".", ".."):
         raise ValueError("Invalid reranker model name")
     dest = args.output / "reranker" / dataset_folder(args) / embedding_folder(args.embedding_model_name)
     dest = dest / "rerank" / method / model_folder
-    if variant is not None:
-        dest = dest / variant
     write_json(dest / "rerank_scores.jsonl", results, jsonl=True)
     write_json(dest / "metrics_rerank.json", metrics)
-    if localization is not None:
+    if listwise:
+        localization = evaluate_localization(queries, results)
         write_json(dest / "metrics_localization.json", localization)
         print(f"Evaluated evidence boxes on {localization['n_pages']} relevant candidate pages")
     failures = sum("api_error" in row for row in results)
     if failures:
         print(f"API fallback to retrieval order: {failures}/{len(results)} queries")
+    if failures == len(results):
+        raise RuntimeError("All reranking requests failed. See api_error in rerank_scores.jsonl.")
     print(f"Recall@5: {metrics['before']['micro']['Recall@5']:.4f} -> {metrics['after']['micro']['Recall@5']:.4f}")
 
 

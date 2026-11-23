@@ -10,9 +10,8 @@ from tempfile import NamedTemporaryFile
 
 from PIL import Image
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 IMAGE_SIZE = {"shortest_edge": 4 * 32 * 32, "longest_edge": 1800 * 32 * 32}
-EMBEDDING_SCHEMA = 1
 
 
 def positive_int(value):
@@ -20,15 +19,6 @@ def positive_int(value):
     if value < 1:
         raise argparse.ArgumentTypeError("expected a positive integer")
     return value
-
-
-def parser(description):
-    from common.dataset import dataset_options
-
-    cli = argparse.ArgumentParser(description=description)
-    dataset_options(cli)
-    cli.add_argument("--output", type=Path, default=ROOT / "output")
-    return cli
 
 
 def local_options(cli):
@@ -41,8 +31,6 @@ def local_device(device):
 
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
-    if device == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA unavailable. Install a CUDA PyTorch build or select --device cpu.")
     dtype = torch.bfloat16
     if device == "cuda" and not torch.cuda.is_bf16_supported():
         dtype = torch.float16
@@ -132,11 +120,6 @@ def parallel_map(executor, function, items, buffer_size):
         pending.extend(executor.submit(function, item) for item in islice(items, 1))
 
 
-def file_stamp(path):
-    stat = path.stat()
-    return [str(path.resolve()), stat.st_size, stat.st_mtime_ns]
-
-
 def embeddings_path(args):
     return args.embeddings or retrieval_dir(args) / "encode" / "embeddings.npz"
 
@@ -154,5 +137,5 @@ def dataset_folder(args):
     if args.dataset_name == "docscope":
         return folder / (args.split or "test")
     if args.dataset_name == "vidore_v3":
-        return folder / (args.subset or "all") / (args.language or "native")
+        return folder / (args.subset or "all")
     return folder

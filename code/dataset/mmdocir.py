@@ -1,6 +1,6 @@
 import pyarrow.parquet as pq
 
-from common.utils import candidate_span, file_stamp, normalize_box, read_jsonl, rerank_document_inputs
+from utils import candidate_span, normalize_box, read_jsonl, rerank_document_inputs
 
 
 class MMDocIR:
@@ -8,12 +8,7 @@ class MMDocIR:
 
     def __init__(self, root):
         self.annotations = root / "MMDocIR_annotations.jsonl"
-        self.pages_path = root / "MMDocIR_pages.parquet"
-        self.layouts_path = root / "MMDocIR_layouts.parquet"
-        self.pages = pq.ParquetFile(self.pages_path)
-
-    def signature(self):
-        return [file_stamp(self.annotations), file_stamp(self.pages_path)]
+        self.pages = pq.ParquetFile(root / "MMDocIR_pages.parquet")
 
     def load(self, limit=None, *, include_ocr=False, include_layouts=False):
         columns = ["doc_name", "passage_id"]
@@ -21,9 +16,6 @@ class MMDocIR:
             columns.append("ocr_text")
         pages = self.pages.read(columns=columns).to_pylist()
         texts = [page["ocr_text"] or "" for page in pages] if include_ocr else None
-        layouts = pq.read_table(
-            self.layouts_path, columns=["doc_name", "page_id", "bbox", "page_size"],
-        ) if include_layouts else None
         queries = []
         for doc in read_jsonl(self.annotations):
             start, end = doc["page_indices"]
@@ -36,8 +28,6 @@ class MMDocIR:
             local_to_global = {int(row["passage_id"]): uid for uid, row in enumerate(rows, start)}
             if len(local_to_global) != len(rows):
                 raise ValueError(f"Duplicate local page numbers: {name}")
-            if layouts is not None:
-                layout_boxes = self.document_layout_boxes(doc, layouts)
             for item in doc["questions"]:
                 gt = sorted({local_to_global[int(page)] for page in item["page_id"]})
                 if not gt:
@@ -50,45 +40,23 @@ class MMDocIR:
                     "gt_pages": gt, "cand_span": [start, end],
                     "content_type": content_type,
                 })
-                if layouts is not None:
-                    queries[-1]["gt_boxes"] = self.evidence_boxes(item, local_to_global, set(gt), layout_boxes)
+                if include_layouts:
+                    queries[-1]["gt_boxes"] = self.evidence_boxes(item, local_to_global, set(gt))
                 if len(queries) == limit:
                     return queries, texts
-        if not queries:
-            raise ValueError("No MMDocIR queries found")
         return queries, texts
 
     @staticmethod
-    def document_layout_boxes(doc, layouts):
-        start, end = doc["layout_indices"]
-        name = doc["doc_name"]
-        if start < 0 or end < start or end >= len(layouts):
-            raise ValueError(f"Invalid document layout span: {name}")
-        boxes = {}
-        for row in layouts.slice(start, end - start + 1).to_pylist():
-            if row["doc_name"] not in (name, name.removesuffix(".pdf")):
-                raise ValueError(f"Invalid document layout span: {name}")
-            box = normalize_box(row["bbox"], row["page_size"])
-            if box is not None:
-                key = row["page_id"], tuple(row["bbox"]), tuple(row["page_size"])
-                boxes[key] = box
-        return boxes
-
-    @staticmethod
-    def evidence_boxes(question, local_to_global, relevant_pages, layout_boxes):
+    def evidence_boxes(question, local_to_global, relevant_pages):
         boxes = {}
         for label in question.get("layout_mapping") or []:
             page = int(label["page"])
             uid = local_to_global.get(page)
             if uid not in relevant_pages:
                 continue
-            annotated = normalize_box(label["bbox"], label["page_size"])
-            if annotated is None:
-                continue
-            key = page, tuple(label["bbox"]), tuple(label["page_size"])
-            # Query annotations may cover several layout rows or have no exact match.
-            box = layout_boxes.get(key, annotated)
-            boxes.setdefault(uid, set()).add(box)
+            box = normalize_box(label["bbox"], label["page_size"])
+            if box is not None:
+                boxes.setdefault(uid, set()).add(box)
         return {uid: sorted(page_boxes) for uid, page_boxes in boxes.items()}
 
     def images(self, ids):

@@ -1,9 +1,6 @@
-import math
-from concurrent.futures import ThreadPoolExecutor
-from itertools import islice
 from pathlib import Path
 
-from common.utils import ROOT, local_options, open_rgb, parallel_map, positive_int
+from utils import ROOT, local_options, open_rgb
 from reranker.model import DEFAULT_RERANKER, RERANKERS
 from reranker.rerank import rerank, rerank_parser
 
@@ -12,30 +9,22 @@ def main(argv=None):
     cli.add_argument("--reranker-model-name", choices=RERANKERS, default=DEFAULT_RERANKER)
     cli.add_argument("--reranker-model", type=Path, help="Override the local reranker directory")
     local_options(cli)
-    cli.add_argument("--workers", type=positive_int, default=4, help="Parallel page image decoders")
     args = cli.parse_args(argv)
-    model = None
+    path = args.reranker_model or ROOT / "model" / args.reranker_model_name
+    model = RERANKERS[args.reranker_model_name](path, args.device)
 
     def rank_pages(query, page_ids, images, _texts):
-        nonlocal model
-        if model is None:
-            path = args.reranker_model or ROOT / "model" / args.reranker_model_name
-            model = RERANKERS[args.reranker_model_name](path, args.device)
         scores = []
-        decoded = parallel_map(executor, open_rgb, images, max(args.batch_size, 2 * args.workers))
-        while batch := list(islice(decoded, args.batch_size)):
-            batch_scores = model.score_batch(query, batch)
-            if len(batch_scores) != len(batch) or not all(map(math.isfinite, batch_scores)):
-                raise ValueError("Invalid pointwise scores")
-            scores.extend(batch_scores)
-        order = sorted(range(len(page_ids)), key=scores.__getitem__, reverse=True)
+        for start in range(0, len(images), args.batch_size):
+            batch = [open_rgb(image) for image in images[start:start + args.batch_size]]
+            scores.extend(model.score_batch(query, batch))
+        pairs = sorted(zip(page_ids, scores, strict=True), key=lambda pair: -pair[1])
         return {
-            "ranking": [page_ids[index] for index in order],
-            "scores": [{"page_uid": page_ids[index], "score": scores[index]} for index in order],
+            "ranking": [uid for uid, _ in pairs],
+            "scores": [{"page_uid": uid, "score": score} for uid, score in pairs],
         }
 
-    with ThreadPoolExecutor(max_workers=args.workers) as executor:
-        rerank(args, rank_pages, method="pointwise", model_name=args.reranker_model_name)
+    rerank(args, rank_pages, method="pointwise", model_name=args.reranker_model_name)
 
 
 if __name__ == "__main__":

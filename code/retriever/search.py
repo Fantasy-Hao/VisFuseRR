@@ -1,18 +1,25 @@
-import json
+import argparse
 from pathlib import Path
-from zipfile import BadZipFile
 
 import numpy as np
 
-from common.dataset import dataset_from_args
-from common.utils import EMBEDDING_SCHEMA, embeddings_path, group_candidates, parser, positive_int, retrieval_dir, write_json
+from dataset import dataset_from_args, parser
+from retriever.encode import archive_selection
 from retriever.fusion import IMAGE_WEIGHT, fuse, fusion_inputs
 from retriever.metrics import evaluate
 from retriever.model import DEFAULT_EMBEDDER, EMBEDDERS
+from utils import embeddings_path, group_candidates, positive_int, retrieval_dir, write_json
 
 
 def rank(scores, page_ids, topk):
     return np.lexsort((page_ids, -scores))[:topk]
+
+
+def image_weight(value):
+    weight = float(value)
+    if not 0 <= weight <= 1:
+        raise argparse.ArgumentTypeError("Image weight must be between 0 and 1")
+    return weight
 
 
 def grid_search(rows):
@@ -36,40 +43,22 @@ def grid_search(rows):
     ]
 
 
-def load_embeddings(path, dataset, model_name):
-    try:
-        with np.load(path, allow_pickle=False) as saved:
-            metadata = json.loads(saved["metadata"].item())
-            if metadata.get("schema", EMBEDDING_SCHEMA) != EMBEDDING_SCHEMA or metadata["dataset"] != dataset.signature():
-                raise ValueError("The archive belongs to a different dataset or revision")
-            if metadata.get("model_name", DEFAULT_EMBEDDER) != model_name:
-                raise ValueError(f"The archive does not contain embeddings for {model_name}")
-            query_ids = saved["query_ids"].tolist()
-            page_ids = saved["page_ids"].tolist()
-            queries, texts, images = saved["queries"], saved["texts"], saved["images"]
-        if (
-            queries.ndim != 2 or texts.ndim != 2 or images.shape != texts.shape
-            or queries.shape[1] != texts.shape[1]
-            or len(query_ids) != len(queries) or len(page_ids) != len(texts)
-            or len(set(query_ids)) != len(query_ids) or len(set(page_ids)) != len(page_ids)
-        ):
-            raise ValueError("Inconsistent embedding IDs or vector shapes")
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, BadZipFile) as error:
-        raise ValueError(f"Cannot use embeddings at {path}. Run code/retriever/run_encode.sh first: {error}") from error
-    return dict(zip(query_ids, queries)), {uid: i for i, uid in enumerate(page_ids)}, texts, images
+def load_embeddings(args):
+    path = embeddings_path(args)
+    with np.load(path, allow_pickle=False) as saved:
+        if "selection" not in saved or saved["selection"].tolist() != archive_selection(args):
+            raise ValueError(f"Run retriever.encode for the selected dataset and model to rebuild {path}")
+        queries = dict(zip(saved["query_ids"].tolist(), saved["queries"], strict=True))
+        page_index = {uid: index for index, uid in enumerate(saved["page_ids"].tolist())}
+        return queries, page_index, saved["texts"], saved["images"]
 
 
 def score_queries(dataset, queries, embeddings, fusion):
     query_vectors, page_index, text_vectors, image_vectors = embeddings
     for group in group_candidates(queries):
         pids = np.asarray(dataset.candidate_ids(group[0]))
-        try:
-            indices = [page_index[uid] for uid in pids]
-            vectors = np.stack([query_vectors[query["qid"]] for query in group])
-        except KeyError as error:
-            raise ValueError(
-                "The archive does not cover this selection. Run code/retriever/run_encode.sh with a larger --limit."
-            ) from error
+        indices = [page_index[uid] for uid in pids]
+        vectors = np.stack([query_vectors[query["qid"]] for query in group])
         page_texts, page_images = text_vectors[indices], image_vectors[indices]
         batch_size = 64
         for start in range(0, len(group), batch_size):
@@ -84,18 +73,10 @@ def score_queries(dataset, queries, embeddings, fusion):
 def search(args):
     dataset = dataset_from_args(args)
     queries, _ = dataset.load(args.limit)
-    path = embeddings_path(args)
-    if (
-        not path.exists() and args.dataset_name == "mmdocir" and args.embeddings is None
-        and args.embedding_model_name == DEFAULT_EMBEDDER
-    ):
-        legacy_path = args.output / "retriever" / args.dataset_name / "embeddings.npz"
-        if legacy_path.is_file():
-            path = legacy_path
-    embeddings = load_embeddings(path, dataset, args.embedding_model_name)
+    embeddings = load_embeddings(args)
 
     dest = retrieval_dir(args) / "retrieval"
-    alpha = IMAGE_WEIGHT
+    alpha = args.alpha
     if args.grid_search:
         grid_rows = [
             (pids, text, image, np.isin(pids, query["gt_pages"]), len(query["gt_pages"]))
@@ -134,7 +115,9 @@ def main(argv=None):
     cli.add_argument("--embedding-model-name", choices=EMBEDDERS, default=DEFAULT_EMBEDDER)
     cli.add_argument("--embeddings", type=Path, help="Override the input embedding archive")
     cli.add_argument("--fusion", choices=("linear", "sigmoid-zscore"), default="linear")
-    cli.add_argument("--grid-search", action="store_true", help="Tune the global image weight on Recall@5")
+    weights = cli.add_mutually_exclusive_group()
+    weights.add_argument("--alpha", type=image_weight, default=IMAGE_WEIGHT, help="Fixed image weight in [0, 1] (default: 0.60)")
+    weights.add_argument("--grid-search", action="store_true", help="Tune the global image weight on Recall@5")
     cli.add_argument("--topk", type=positive_int, default=50)
     search(cli.parse_args(argv))
 

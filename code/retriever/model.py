@@ -1,4 +1,4 @@
-from common.utils import IMAGE_SIZE, local_device
+from utils import IMAGE_SIZE, local_device
 
 MAX_LENGTH = 8192
 INSTRUCTION = "Represent the user's input."
@@ -6,9 +6,6 @@ INSTRUCTION = "Represent the user's input."
 
 class Qwen3VLEmbedding:
     def __init__(self, model_path, device):
-        if not model_path.is_dir():
-            raise FileNotFoundError(f"Local embedding model directory not found: {model_path}")
-
         import torch
         from transformers import Qwen3VLModel, Qwen3VLProcessor
 
@@ -26,8 +23,6 @@ class Qwen3VLEmbedding:
         if info["missing_keys"]:
             raise ValueError(f"Incomplete embedding checkpoint: {info['missing_keys'][:5]}")
         self.model = model.to(self.device).eval()
-
-    encoding = [MAX_LENGTH, INSTRUCTION, IMAGE_SIZE]
 
     def encode_batch(self, items, role):
         conversations = [
@@ -57,8 +52,6 @@ class Qwen3VLEmbedding:
 
 
 class JinaEmbeddingsV4:
-    encoding = ["retrieval", "single-vector", 8192]
-
     def __init__(self, model_path, device):
         import torch
         from transformers import AutoModel
@@ -82,8 +75,6 @@ class JinaEmbeddingsV4:
 
 
 class WeMMEmbedding:
-    encoding = ["embedding", "right-padding", 16]
-
     def __init__(self, model_path, device):
         import torch
         from qwen_vl_utils import process_vision_info

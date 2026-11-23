@@ -1,7 +1,9 @@
 import json
 from collections import defaultdict
 
-from common.utils import candidate_span, file_stamp, normalize_box, rerank_document_inputs
+import pymupdf
+
+from utils import candidate_span, normalize_box, rerank_document_inputs
 
 
 SPLITS = ("dev", "test", "test-unseen", "all")
@@ -12,18 +14,8 @@ class DocScope:
     candidate_ids = staticmethod(candidate_span)
 
     def __init__(self, root, *, split="test"):
-        self.annotations = root / "benchmark.json"
         self.pdf_dir = root / "pdfs"
-        self.split = split
-        if split not in SPLITS:
-            raise ValueError(f"Unknown DocScope split: {split}")
-        if not self.annotations.is_file() or not self.pdf_dir.is_dir():
-            raise FileNotFoundError(f"DocScope expects benchmark.json and pdfs/ in {root}. Set --dataset to their directory.")
-
-        import pymupdf
-
-        self.pdf = pymupdf
-        with self.annotations.open(encoding="utf-8-sig") as stream:
+        with (root / "benchmark.json").open(encoding="utf-8-sig") as stream:
             entries = json.load(stream)
         source_split = "test" if split == "test-unseen" else split
         excluded_docs = (
@@ -37,19 +29,10 @@ class DocScope:
         ]
         if not self.entries:
             raise ValueError(f"No answerable DocScope queries in split {split}")
-        if len({entry["id"] for entry in self.entries}) != len(self.entries):
-            raise ValueError("Duplicate DocScope query IDs")
         self.documents = {}
 
     def pdf_path(self, doc_id):
         return self.pdf_dir / f"{doc_id.removesuffix('.pdf')}.pdf"
-
-    def signature(self):
-        doc_ids = sorted({item["pdf"]["doc_id_str"] for item in self.entries})
-        return [
-            "docscope-1", self.split, RENDER_DPI, file_stamp(self.annotations),
-            *[file_stamp(self.pdf_path(doc_id)) for doc_id in doc_ids],
-        ]
 
     def load(self, limit=None, *, include_ocr=False, include_layouts=False):
         docs = defaultdict(list)
@@ -62,11 +45,8 @@ class DocScope:
         documents = {}
         start = 0
         for doc_id, items in docs.items():
-            path = self.pdf_path(doc_id)
-            with self.pdf.open(path) as document:
+            with pymupdf.open(self.pdf_path(doc_id)) as document:
                 end = start + len(document)
-                if end == start:
-                    raise ValueError(f"Empty DocScope PDF: {path}")
                 dimensions = {}
                 for qid, item in items:
                     evidence = item["evidences"]
@@ -91,14 +71,15 @@ class DocScope:
         self.documents = documents
         return queries, texts
 
-    def evidence_boxes(self, item, document, start, dimensions):
+    @staticmethod
+    def evidence_boxes(item, document, start, dimensions):
         page_boxes = defaultdict(set)
         by_id = {}
         scale = RENDER_DPI / 72
         for label in item["evidences"]:
             page_no = label["page"]
             if page_no not in dimensions:
-                bounds = (document[page_no - 1].rect * self.pdf.Matrix(scale, scale)).irect
+                bounds = (document[page_no - 1].rect * pymupdf.Matrix(scale, scale)).irect
                 dimensions[page_no] = (bounds.width, bounds.height)
             box = normalize_box(label["bbox"], dimensions[page_no])
             if box is not None:
@@ -119,7 +100,7 @@ class DocScope:
         for doc_id, (start, end) in self.documents.items():
             selected = sorted(pending.intersection(range(start, end)))
             if selected:
-                with self.pdf.open(self.pdf_path(doc_id)) as document:
+                with pymupdf.open(self.pdf_path(doc_id)) as document:
                     for uid in selected:
                         image = document[uid - start].get_pixmap(dpi=RENDER_DPI, alpha=False, annots=False)
                         yield uid, image.tobytes("jpeg", jpg_quality=90)

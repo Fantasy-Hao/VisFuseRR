@@ -9,12 +9,10 @@ import httpx
 from dotenv import load_dotenv
 from PIL import Image
 
-from common.utils import ROOT, open_rgb, positive_int
+from utils import ROOT, open_rgb, positive_int
 from reranker.rerank import rerank, rerank_parser
 
 MODEL = "Qwen/Qwen3.8-27B"
-MAX_OUTPUT_TOKENS = 8192
-THINKING_BUDGET = 8192
 API_TIMEOUT = 300
 EVIDENCE_TYPES = ("table", "chart", "figure", "text", "formula", "other")
 SYSTEM_PROMPT = (
@@ -53,21 +51,13 @@ def image_url(binary, max_side=None):
         return "data:image/jpeg;base64," + base64.b64encode(stream.getvalue()).decode("ascii")
 
 
-def listwise_content(query, page_ids, images, texts, *, max_ocr_chars=None, max_image_side=None):
-    if images is None and texts is None:
-        raise ValueError("Listwise requires page OCR or images")
-    count = len(page_ids)
+def listwise_content(query, images, texts, *, max_ocr_chars=None, max_image_side=None):
+    count = len(images)
     content = [{"type": "text", "text": f"Query: {query}\nCandidate count: {count}"}]
-    ocr_pages = texts if texts is not None else [None] * count
-    image_pages = images if images is not None else [None] * count
-    for number, (_, binary, text) in enumerate(zip(page_ids, image_pages, ocr_pages, strict=True), 1):
-        label = f"Candidate {number}"
-        if texts is not None:
-            ocr = (text or "").strip()[:max_ocr_chars]
-            label += f"\nOCR: {ocr or '[empty]'}"
-        content.append({"type": "text", "text": label})
-        if images is not None:
-            content.append({"type": "image_url", "image_url": {"url": image_url(binary, max_image_side)}})
+    for number, (binary, text) in enumerate(zip(images, texts, strict=True), 1):
+        ocr = text.strip()[:max_ocr_chars] or "[empty]"
+        content.append({"type": "text", "text": f"Candidate {number}\nOCR: {ocr}"})
+        content.append({"type": "image_url", "image_url": {"url": image_url(binary, max_image_side)}})
     content.append({
         "type": "text",
         "text": f"Use candidate IDs 1 through {count} in both sections.\n{OUTPUT_PROMPT}",
@@ -75,29 +65,14 @@ def listwise_content(query, page_ids, images, texts, *, max_ocr_chars=None, max_
     return content
 
 
-def json_array(text, *, recover_objects=False):
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.partition("\n")[2].removesuffix("```").strip()
+def tagged_array(pattern, answer):
+    match = pattern.search(answer)
+    if not match:
+        return []
     try:
-        value = json.loads(text)
+        value = json.loads(match[1])
     except ValueError:
-        if not recover_objects or not text.startswith("["):
-            return []
-        # Keep complete evidence objects even when generation stops mid-array.
-        value = []
-        decoder = json.JSONDecoder()
-        remaining = text[1:].lstrip()
-        while remaining.startswith("{"):
-            try:
-                obj, end = decoder.raw_decode(remaining)
-            except ValueError:
-                break
-            value.append(obj)
-            remaining = remaining[end:].lstrip()
-            if not remaining.startswith(","):
-                break
-            remaining = remaining[1:].lstrip()
+        return []
     return value if isinstance(value, list) else []
 
 
@@ -117,27 +92,10 @@ def valid_boxes(boxes):
     return result
 
 
-def last_integer_list(text):
-    decoder = json.JSONDecoder()
-    ranking = []
-    offset = 0
-    while (start := text.find("[", offset)) != -1:
-        try:
-            value, offset = decoder.raw_decode(text, start)
-        except ValueError:
-            offset = start + 1
-            continue
-        if isinstance(value, list) and value and all(type(item) is int for item in value):
-            ranking = value
-    return ranking
-
-
-def legalize_output(answer, page_ids, *, include_images=True):
+def legalize_output(answer, page_ids):
     candidate_ids = range(1, len(page_ids) + 1)
-    evidence_block = EVIDENCE_BLOCK.search(answer)
-    evidence_rows = json_array(evidence_block[1], recover_objects=True) if evidence_block else []
     by_id = {}
-    for row in evidence_rows:
+    for row in tagged_array(EVIDENCE_BLOCK, answer):
         candidate = row.get("id") if isinstance(row, dict) else None
         if type(candidate) is int and candidate in candidate_ids:
             by_id.setdefault(candidate, row)
@@ -148,25 +106,18 @@ def legalize_output(answer, page_ids, *, include_images=True):
         kind, relevance, reason = row.get("evidence_type"), row.get("relevance"), row.get("reason")
         evidence.append({
             "id": candidate,
-            "evidence_boxes": valid_boxes(row.get("evidence_boxes")) if include_images else [],
+            "evidence_boxes": valid_boxes(row.get("evidence_boxes")),
             "evidence_type": kind if kind in EVIDENCE_TYPES else None,
             "relevance": relevance if type(relevance) is int and 0 <= relevance <= 4 else None,
             "reason": reason.strip() if isinstance(reason, str) else "",
             "page_uid": page_uid,
         })
 
-    ranking_text = answer[evidence_block.end():] if evidence_block else answer
-    ranking_block = RANKING_BLOCK.search(ranking_text)
-    ranking = json_array(ranking_block[1]) if ranking_block else []
+    ranking = tagged_array(RANKING_BLOCK, answer)
     source = "ranking_tag"
-    if not any(type(item) is int and item in candidate_ids for item in ranking):
-        ranking = last_integer_list(ranking_text) if evidence_block else json_array(answer)
-        source = "integer_list"
     order = dict.fromkeys(item for item in ranking if type(item) is int and item in candidate_ids)
     if not order:
-        judged = [row for row in evidence if row["relevance"] is not None]
-        order = dict.fromkeys(row["id"] for row in sorted(judged, key=lambda row: -row["relevance"]))
-        source = "relevance" if order else "retrieval"
+        source = "retrieval"
     for candidate in candidate_ids:
         order.setdefault(candidate, None)
     return {
@@ -178,11 +129,10 @@ def legalize_output(answer, page_ids, *, include_images=True):
 
 def rank_pages(
     client, model, query, page_ids, images, texts, *,
-    max_ocr_chars=None, max_image_side=None, max_tokens=MAX_OUTPUT_TOKENS,
-    enable_thinking=True, thinking_budget=THINKING_BUDGET,
+    max_ocr_chars=None, max_image_side=None,
 ):
     content = listwise_content(
-        query, page_ids, images, texts, max_ocr_chars=max_ocr_chars, max_image_side=max_image_side,
+        query, images, texts, max_ocr_chars=max_ocr_chars, max_image_side=max_image_side,
     )
     payload = {
         "model": model,
@@ -191,30 +141,21 @@ def rank_pages(
             {"role": "user", "content": content},
         ],
         "temperature": 0,
-        "max_tokens": max_tokens,
-        "enable_thinking": enable_thinking,
+        "max_tokens": 8192,
+        "enable_thinking": True,
+        "thinking_budget": 8192,
     }
-    if enable_thinking:
-        payload["thinking_budget"] = thinking_budget
     try:
         response = client.post("chat/completions", json=payload)
-    except httpx.RequestError as error:
-        return {**legalize_output("", page_ids), "api_error": type(error).__name__}
-    if not response.is_success:
-        return {**legalize_output("", page_ids), "api_error": f"HTTP {response.status_code}"}
-
-    try:
+        response.raise_for_status()
         choice = response.json()["choices"][0]
         answer = choice["message"]["content"]
-    except (IndexError, KeyError, TypeError, ValueError):
-        return {**legalize_output("", page_ids), "api_error": "Invalid completion response"}
-    finish_reason = choice.get("finish_reason")
-    if not isinstance(answer, str) or not answer.strip():
-        result = {**legalize_output("", page_ids), "api_error": "Empty completion content"}
-    else:
-        result = legalize_output(answer, page_ids, include_images=images is not None)
-    if isinstance(finish_reason, str):
-        result["finish_reason"] = finish_reason
+        result = legalize_output(answer, page_ids)
+    except (httpx.HTTPError, ValueError, IndexError, KeyError, TypeError) as error:
+        return {**legalize_output("", page_ids), "api_error": str(error)}
+    result["finish_reason"] = choice.get("finish_reason")
+    if result["ranking_source"] == "retrieval":
+        result["api_error"] = "Completion has no usable ranking"
     return result
 
 
@@ -222,27 +163,13 @@ def main(argv=None):
     cli = rerank_parser("Rerank all candidate pages together with the SiliconFlow chat API")
     cli.add_argument("--model", help=f"Override SILICONFLOW_MODEL (default: {MODEL})")
     cli.add_argument("--workers", type=positive_int, default=4, help="Concurrent API requests")
-    modalities = cli.add_mutually_exclusive_group()
-    modalities.add_argument("--no-text", "--no_text", action="store_true", help="Rank using page images only")
-    modalities.add_argument("--no-image", "--no_image", action="store_true", help="Rank using page OCR only")
-    cli.add_argument("--no-thinking", action="store_true", help="Disable the API's thinking mode")
-    cli.add_argument(
-        "--thinking-budget", "--thinking_budget", type=positive_int, default=THINKING_BUDGET,
-        help=f"Reasoning token budget (default: {THINKING_BUDGET})",
-    )
     cli.add_argument(
         "--max-ocr-chars", type=positive_int, help="OCR characters per page (default: full text)",
     )
     cli.add_argument(
         "--max-image-side", type=positive_int, help="Longest page image side in pixels (default: original size)",
     )
-    cli.add_argument(
-        "--max-tokens", type=positive_int, default=MAX_OUTPUT_TOKENS,
-        help=f"API output token budget (default: {MAX_OUTPUT_TOKENS})",
-    )
     args = cli.parse_args(argv)
-    if not args.no_thinking and not 128 <= args.thinking_budget <= 32768:
-        cli.error("--thinking-budget must be between 128 and 32768")
     load_dotenv(ROOT / ".env")
     api_key = os.getenv("SILICONFLOW_API_KEY")
     if not api_key:
@@ -252,15 +179,9 @@ def main(argv=None):
     with httpx.Client(base_url=base_url, headers={"Authorization": f"Bearer {api_key}"}, timeout=API_TIMEOUT) as client:
         rank = partial(
             rank_pages, client, model, max_ocr_chars=args.max_ocr_chars,
-            max_image_side=args.max_image_side, max_tokens=args.max_tokens,
-            enable_thinking=not args.no_thinking, thinking_budget=args.thinking_budget,
+            max_image_side=args.max_image_side,
         )
-        variant = "image-only" if args.no_text else "text-only" if args.no_image else None
-        rerank(
-            args, rank,
-            method="listwise", model_name=model, variant=variant,
-            include_ocr=not args.no_text, include_images=not args.no_image, workers=args.workers,
-        )
+        rerank(args, rank, method="listwise", model_name=model, workers=args.workers)
 
 
 if __name__ == "__main__":
