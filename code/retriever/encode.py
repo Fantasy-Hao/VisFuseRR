@@ -5,7 +5,9 @@ import numpy as np
 
 from dataset import dataset_from_args, parser
 from retriever.model import DEFAULT_EMBEDDER, EMBEDDERS
-from utils import ROOT, atomic_output, dataset_folder, embeddings_path, group_candidates, local_options, open_rgb
+from utils import (
+    ROOT, atomic_output, dataset_folder, embeddings_path, group_candidates, local_options, open_rgb,
+)
 
 
 def archive_selection(args):
@@ -17,13 +19,14 @@ def encode_items(model, items, batch_size, role, label, count):
     items = iter(items)
     batches = []
     processed = 0
+    print(f"{label}: 0/{count}", flush=True)
     while batch := list(islice(items, batch_size)):
         vectors = np.asarray(model.encode_batch(batch, role), dtype=np.float32)
         if vectors.ndim != 2 or len(vectors) != len(batch) or not np.isfinite(vectors).all():
             raise ValueError(f"{label}: model returned invalid embeddings")
         batches.append(vectors)
         processed += len(batch)
-        if len(batches) % 100 == 0 or processed == count:
+        if len(batches) == 1 or len(batches) % 10 == 0 or processed == count:
             print(f"{label}: {processed}/{count}", flush=True)
     if processed != count:
         raise ValueError(f"{label}: expected {count} embeddings, got {processed}")
@@ -31,11 +34,13 @@ def encode_items(model, items, batch_size, role, label, count):
 
 
 def encode(args):
+    print(f"Loading {dataset_folder(args)} queries and page text", flush=True)
     dataset = dataset_from_args(args)
     queries, texts = dataset.load(args.limit, include_ocr=True)
     query_ids = [query["qid"] for query in queries]
     page_ids = sorted({uid for group in group_candidates(queries) for uid in dataset.candidate_ids(group[0])})
     model_path = args.embedding_model or ROOT / "model" / args.embedding_model_name
+    print(f"Loading embedder {args.embedding_model_name} for {len(queries)} queries and {len(page_ids)} pages", flush=True)
     embedder = EMBEDDERS[args.embedding_model_name](model_path, args.device)
     query_inputs = ({"type": "text", "text": query["query"] or "NULL"} for query in queries)
     text_inputs = (
@@ -43,11 +48,12 @@ def encode(args):
         for uid in page_ids
     )
     query_vectors = encode_items(embedder, query_inputs, args.batch_size, "query", "Queries", len(queries))
-    text_vectors = encode_items(embedder, text_inputs, args.batch_size, "passage", "Page OCR", len(page_ids))
+    text_vectors = encode_items(embedder, text_inputs, args.batch_size, "passage", "Page text", len(page_ids))
     image_inputs = ({"type": "image", "image": open_rgb(binary)} for _, binary in dataset.images(page_ids))
     image_vectors = encode_items(embedder, image_inputs, args.batch_size, "image", "Page images", len(page_ids))
 
     path = embeddings_path(args)
+    print(f"Writing embeddings to {path}", flush=True)
     with atomic_output(path, "wb") as stream:
         np.savez(
             stream, selection=archive_selection(args), query_ids=query_ids, page_ids=page_ids,

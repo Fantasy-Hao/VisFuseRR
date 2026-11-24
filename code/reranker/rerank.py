@@ -6,7 +6,7 @@ from urllib.parse import quote
 from dataset import dataset_from_args, parser
 from utils import (
     dataset_folder, embedding_folder, parallel_map,
-    positive_int, read_jsonl, retrieval_dir, write_json,
+    positive_int, read_jsonl, report_progress, retrieval_dir, write_json,
 )
 from reranker.metrics import evaluate, evaluate_localization
 from retriever.model import DEFAULT_EMBEDDER, EMBEDDERS
@@ -39,10 +39,12 @@ def candidate_rankings(dataset, queries, path, topk):
 
 
 def rerank(args, rank_pages, *, method, model_name, workers=1):
+    print(f"Loading {dataset_folder(args)} data for {method} reranking", flush=True)
     dataset = dataset_from_args(args)
     listwise = method == "listwise"
     queries, texts = dataset.load(args.limit, include_ocr=listwise, include_layouts=listwise)
     path = args.candidates or retrieval_dir(args) / "retrieval" / "topk_candidates.jsonl"
+    print(f"Loading retrieval candidates from {path}", flush=True)
     before = candidate_rankings(dataset, queries, path, args.topk)
 
     def rank_query(item):
@@ -53,13 +55,25 @@ def rerank(args, rank_pages, *, method, model_name, workers=1):
         result = rank_pages(query["query"], ids, images, page_texts)
         return {"qid": qid, **result}
 
+    label = f"{method.capitalize()} reranking queries"
+    count = len(queries)
+    report_progress(label, 0, count, every=10)
+
+    def collect(rows):
+        results = []
+        for completed, result in enumerate(rows, 1):
+            results.append(result)
+            report_progress(label, completed, count, every=10)
+        return results
+
     inputs = dataset.rerank_inputs(queries, before)
     if workers == 1:
-        results = list(map(rank_query, inputs))
+        results = collect(map(rank_query, inputs))
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            results = list(parallel_map(executor, rank_query, inputs, workers))
+            results = collect(parallel_map(executor, rank_query, inputs, workers))
 
+    print(f"Evaluating {method} rankings", flush=True)
     results.sort(key=lambda row: row["qid"])
     metrics = evaluate(queries, before, results)
     model_folder = quote(model_name, safe="")
@@ -72,13 +86,13 @@ def rerank(args, rank_pages, *, method, model_name, workers=1):
     if listwise:
         localization = evaluate_localization(queries, results)
         write_json(dest / "metrics_localization.json", localization)
-        print(f"Evaluated evidence boxes on {localization['n_pages']} relevant candidate pages")
+        print(f"Evaluated evidence boxes on {localization['n_pages']} relevant candidate pages", flush=True)
     failures = sum("api_error" in row for row in results)
     if failures:
-        print(f"API fallback to retrieval order: {failures}/{len(results)} queries")
+        print(f"API fallback to retrieval order: {failures}/{len(results)} queries", flush=True)
     if failures == len(results):
         raise RuntimeError("All reranking requests failed. See api_error in rerank_scores.jsonl.")
-    print(f"Recall@5: {metrics['before']['micro']['Recall@5']:.4f} -> {metrics['after']['micro']['Recall@5']:.4f}")
+    print(f"Recall@5: {metrics['before']['micro']['Recall@5']:.4f} -> {metrics['after']['micro']['Recall@5']:.4f}", flush=True)
 
 
 if __name__ == "__main__":

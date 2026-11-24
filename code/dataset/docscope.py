@@ -3,7 +3,7 @@ from collections import defaultdict
 
 import pymupdf
 
-from utils import candidate_span, normalize_box, rerank_document_inputs
+from utils import candidate_span, normalize_box, report_progress, rerank_document_inputs
 
 
 SPLITS = ("dev", "test", "test-unseen", "all")
@@ -52,7 +52,10 @@ class DocScope:
         texts = {} if include_ocr else None
         documents = {}
         start = 0
-        for doc_id, items in docs.items():
+        label = "Reading DocScope PDF text" if include_ocr else "Checking DocScope PDFs"
+        count = len(docs)
+        report_progress(label, 0, count, every=10)
+        for completed, (doc_id, items) in enumerate(docs.items(), 1):
             with self.open_pdf(doc_id) as document:
                 end = start + len(document)
                 dimensions = {}
@@ -76,6 +79,7 @@ class DocScope:
                     texts.update((uid, page.get_text("text", sort=True)) for uid, page in enumerate(document, start))
                 documents[doc_id] = (start, end)
                 start = end
+            report_progress(label, completed, count, every=10)
         self.documents = documents
         return queries, texts
 

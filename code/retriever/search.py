@@ -8,7 +8,9 @@ from retriever.encode import archive_selection
 from retriever.fusion import IMAGE_WEIGHT, fuse, fusion_inputs
 from retriever.metrics import evaluate
 from retriever.model import DEFAULT_EMBEDDER, EMBEDDERS
-from utils import embeddings_path, group_candidates, positive_int, retrieval_dir, write_json
+from utils import (
+    dataset_folder, embeddings_path, group_candidates, positive_int, report_progress, retrieval_dir, write_json,
+)
 
 
 def rank(scores, page_ids, topk):
@@ -26,18 +28,20 @@ def grid_search(rows):
     """Tune the global image weight by mean per-query Recall@5."""
     recalls = {}
 
-    def best(steps):
-        for step in steps:
+    def best(steps, label):
+        report_progress(label, 0, len(steps), every=5)
+        for completed, step in enumerate(steps, 1):
             if step not in recalls:
                 recalls[step] = float(np.mean([
                     relevant[rank(fuse(text, image, step / 100), page_ids, 5)].sum() / count
                     for page_ids, text, image, relevant, count in rows
                 ]))
+            report_progress(label, completed, len(steps), every=5)
         default_step = round(100 * IMAGE_WEIGHT)
         return max(recalls, key=lambda step: (recalls[step], -abs(step - default_step), -step))
 
-    coarse = best(range(0, 101, 5))
-    optimum = best(range(max(0, coarse - 5), min(100, coarse + 5) + 1))
+    coarse = best(range(0, 101, 5), "Grid search coarse steps")
+    optimum = best(range(max(0, coarse - 5), min(100, coarse + 5) + 1), "Grid search fine steps")
     return optimum / 100, [
         {"alpha": step / 100, "Recall@5": recalls[step]} for step in sorted(recalls)
     ]
@@ -71,24 +75,34 @@ def score_queries(dataset, queries, embeddings, fusion):
 
 
 def search(args):
+    print(f"Loading {dataset_folder(args)} queries", flush=True)
     dataset = dataset_from_args(args)
     queries, _ = dataset.load(args.limit)
+    count = len(queries)
+    print(f"Loading embeddings for {count} queries from {embeddings_path(args)}", flush=True)
     embeddings = load_embeddings(args)
 
     dest = retrieval_dir(args) / "retrieval"
     alpha = args.alpha
     if args.grid_search:
-        grid_rows = [
-            (pids, text, image, np.isin(pids, query["gt_pages"]), len(query["gt_pages"]))
-            for query, pids, _, _, text, image in score_queries(dataset, queries, embeddings, args.fusion)
-        ]
+        label = "Preparing grid search queries"
+        grid_rows = []
+        report_progress(label, 0, count, every=100)
+        scored = score_queries(dataset, queries, embeddings, args.fusion)
+        for completed, (query, pids, _, _, text, image) in enumerate(scored, 1):
+            relevant = query["gt_pages"]
+            grid_rows.append((pids, text, image, np.isin(pids, relevant), len(relevant)))
+            report_progress(label, completed, count, every=100)
         alpha, trials = grid_search(grid_rows)
         del grid_rows
         write_json(dest / "gridsearch.json", {"fusion": args.fusion, "best_alpha": alpha, "trials": trials})
-        print(f"Grid search: best image weight={alpha:.2f}")
+        print(f"Grid search: best image weight={alpha:.2f}", flush=True)
 
     candidates, rankings = {}, {}
-    for query, pids, text, image, text_fusion, image_fusion in score_queries(dataset, queries, embeddings, args.fusion):
+    label = "Retrieving queries"
+    report_progress(label, 0, count, every=100)
+    scored = score_queries(dataset, queries, embeddings, args.fusion)
+    for completed, (query, pids, text, image, text_fusion, image_fusion) in enumerate(scored, 1):
         scores = fuse(text_fusion, image_fusion, alpha)
         order = rank(scores, pids, args.topk)
         selected = [
@@ -103,11 +117,13 @@ def search(args):
             "alpha": alpha, "candidates": selected,
         }
         rankings[query["qid"]] = [candidate["page_uid"] for candidate in selected]
+        report_progress(label, completed, count, every=100)
 
+    print(f"Writing retrieval candidates and metrics to {dest}", flush=True)
     write_json(dest / "topk_candidates.jsonl", (candidates[query["qid"]] for query in queries), jsonl=True)
     metrics = evaluate(queries, rankings)
     write_json(dest / "metrics_retrieval.json", metrics)
-    print(f"Retrieved {len(queries)} queries. Recall@5={metrics['micro']['Recall@5']:.4f}")
+    print(f"Retrieved {count} queries. Recall@5={metrics['micro']['Recall@5']:.4f}", flush=True)
 
 
 def main(argv=None):

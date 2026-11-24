@@ -7,7 +7,7 @@ from shutil import copyfileobj
 
 import pymupdf
 
-from utils import atomic_output, candidate_span, normalize_box, read_jsonl, rerank_document_inputs
+from utils import atomic_output, candidate_span, normalize_box, read_jsonl, report_progress, rerank_document_inputs
 
 
 ANNOTATIONS = ("LongDocURL_public_with_subtask_category.jsonl", "LongDocURL_public.jsonl")
@@ -67,9 +67,13 @@ class LongDocURL:
         if include_ocr:
             texts = {}
             self.prepare_pdfs(documents)
-            for doc_id, (start, end) in documents.items():
+            label = "Reading LongDocURL PDF text"
+            count = len(documents)
+            report_progress(label, 0, count, every=10)
+            for completed, (doc_id, (start, end)) in enumerate(documents.items(), 1):
                 with self.open_pdf(doc_id, end - start) as document:
                     texts.update((uid, page.get_text("text", sort=True)) for uid, page in enumerate(document, start))
+                report_progress(label, completed, count, every=10)
         self.documents = documents
         return queries, texts
 
@@ -100,8 +104,18 @@ class LongDocURL:
     def prepare_pdfs(self, doc_ids):
         pending = {f"{doc_id}.pdf" for doc_id in doc_ids if not (self.pdf_dir / f"{doc_id}.pdf").is_file()}
         if pending and self.archive.is_file():
-            with tarfile.open(self.archive, "r|gz") as archive:
+            count = len(pending)
+            label = f"Extracting LongDocURL PDFs from {self.archive.name}"
+            report_progress(label, 0, count, every=10)
+            mib = 1024**2
+            next_report = 256 * mib
+            archive_size = self.archive.stat().st_size
+            with self.archive.open("rb") as stream, tarfile.open(fileobj=stream, mode="r|gz") as archive:
                 for member in archive:
+                    scanned = stream.tell()
+                    if scanned >= next_report:
+                        print(f"Scanned LongDocURL archive: {scanned // mib}/{archive_size // mib} MiB", flush=True)
+                        next_report = scanned + 256 * mib
                     name = PurePosixPath(member.name).name
                     if not member.isfile() or name not in pending:
                         continue
@@ -109,6 +123,7 @@ class LongDocURL:
                     with archive.extractfile(member) as source, atomic_output(self.pdf_dir / name, "wb") as output:
                         copyfileobj(source, output)
                     pending.remove(name)
+                    report_progress(label, count - len(pending), count, every=10)
                     if not pending:
                         break
         if pending:

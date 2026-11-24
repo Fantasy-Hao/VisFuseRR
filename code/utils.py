@@ -111,6 +111,11 @@ def write_json(path, value, *, jsonl=False):
             stream.write("\n")
 
 
+def report_progress(label, completed, total, *, every):
+    if completed in (0, 1, total) or completed % every == 0:
+        print(f"{label}: {completed}/{total}", flush=True)
+
+
 def parallel_map(executor, function, items, buffer_size):
     """Preserve input order and limit the number of items retained in memory."""
     items = iter(items)

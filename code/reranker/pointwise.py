@@ -11,6 +11,7 @@ def main(argv=None):
     local_options(cli)
     args = cli.parse_args(argv)
     path = args.reranker_model or ROOT / "model" / args.reranker_model_name
+    print(f"Loading pointwise model {args.reranker_model_name}", flush=True)
     model = RERANKERS[args.reranker_model_name](path, args.device)
 
     def rank_pages(query, page_ids, images, _texts):
