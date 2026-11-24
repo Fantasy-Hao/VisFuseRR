@@ -8,7 +8,7 @@ export PYTHONPATH="$PWD/code${PYTHONPATH:+:$PYTHONPATH}"
 # # Qwen3-VL-Embedding-8B
 # python -m retriever.encode --dataset-name mmdocir --embedding-model-name Qwen3-VL-Embedding-8B --batch-size 8
 # python -m retriever.search --dataset-name mmdocir --embedding-model-name Qwen3-VL-Embedding-8B --fusion sigmoid-zscore --grid-search --topk 50
-python -m reranker.pointwise --dataset-name mmdocir --embedding-model-name Qwen3-VL-Embedding-8B --reranker-model-name Qwen3-VL-Reranker-8B --topk 10 --batch-size 8
+# python -m reranker.pointwise --dataset-name mmdocir --embedding-model-name Qwen3-VL-Embedding-8B --reranker-model-name Qwen3-VL-Reranker-8B --topk 10 --batch-size 8
 # python -m reranker.pointwise --dataset-name mmdocir --embedding-model-name Qwen3-VL-Embedding-8B --reranker-model-name jina-reranker-m0 --topk 10 --batch-size 8
 # python -m reranker.listwise --dataset-name mmdocir --embedding-model-name Qwen3-VL-Embedding-8B --topk 10
 
@@ -31,7 +31,7 @@ python -m reranker.pointwise --dataset-name mmdocir --embedding-model-name Qwen3
 # # Qwen3-VL-Embedding-8B
 # python -m retriever.encode --dataset-name docscope --split test --embedding-model-name Qwen3-VL-Embedding-8B --batch-size 8
 # python -m retriever.search --dataset-name docscope --split test --embedding-model-name Qwen3-VL-Embedding-8B --fusion sigmoid-zscore --grid-search --topk 50
-python -m reranker.pointwise --dataset-name docscope --split test --embedding-model-name Qwen3-VL-Embedding-8B --reranker-model-name Qwen3-VL-Reranker-8B --topk 10 --batch-size 8
+# python -m reranker.pointwise --dataset-name docscope --split test --embedding-model-name Qwen3-VL-Embedding-8B --reranker-model-name Qwen3-VL-Reranker-8B --topk 10 --batch-size 8
 # python -m reranker.pointwise --dataset-name docscope --split test --embedding-model-name Qwen3-VL-Embedding-8B --reranker-model-name jina-reranker-m0 --topk 10 --batch-size 8
 # python -m reranker.listwise --dataset-name docscope --split test --embedding-model-name Qwen3-VL-Embedding-8B --topk 10
 
@@ -54,7 +54,7 @@ python -m reranker.pointwise --dataset-name docscope --split test --embedding-mo
 # # Qwen3-VL-Embedding-8B
 python -m retriever.encode --dataset-name longdocurl --embedding-model-name Qwen3-VL-Embedding-8B --batch-size 8
 python -m retriever.search --dataset-name longdocurl --embedding-model-name Qwen3-VL-Embedding-8B --fusion sigmoid-zscore --grid-search --topk 50
-python -m reranker.pointwise --dataset-name longdocurl --embedding-model-name Qwen3-VL-Embedding-8B --reranker-model-name Qwen3-VL-Reranker-8B --topk 10 --batch-size 8
+# python -m reranker.pointwise --dataset-name longdocurl --embedding-model-name Qwen3-VL-Embedding-8B --reranker-model-name Qwen3-VL-Reranker-8B --topk 10 --batch-size 8
 # python -m reranker.pointwise --dataset-name longdocurl --embedding-model-name Qwen3-VL-Embedding-8B --reranker-model-name jina-reranker-m0 --topk 10 --batch-size 8
 # python -m reranker.listwise --dataset-name longdocurl --embedding-model-name Qwen3-VL-Embedding-8B --topk 10
 
