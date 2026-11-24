@@ -136,6 +136,4 @@ def dataset_folder(args):
     folder = Path(args.dataset_name)
     if args.dataset_name == "docscope":
         return folder / (args.split or "test")
-    if args.dataset_name == "vidore_v3":
-        return folder / (args.subset or "all")
     return folder

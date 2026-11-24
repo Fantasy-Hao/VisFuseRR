@@ -26,15 +26,20 @@ def best_overlap(predicted, ground_truth):
 
 
 def evaluate_localization(queries, results):
-    """Score each retrieved, relevant query-page pair with valid ground-truth boxes."""
+    """Score localization on annotated pages, with missed pages counted end to end."""
     results_by_query = {row["qid"]: row for row in results}
     pages = []
     n_gt_pages = n_facts = covered_facts = 0
     for query in queries:
         qid = query["qid"]
         result = results_by_query[qid]
-        predictions = {row["page_uid"]: row["evidence_boxes"] for row in result.get("evidence", [])}
-        n_gt_pages += len(query["gt_boxes"])
+        ranking = set(result["ranking"])
+        predictions = {
+            row["page_uid"]: row["evidence_boxes"]
+            for row in result.get("evidence", []) if row["page_uid"] in ranking
+        }
+        truth_by_page = {uid: boxes for uid, boxes in query.get("gt_boxes", {}).items() if boxes}
+        n_gt_pages += len(truth_by_page)
         for alternatives in query.get("gt_facts", []):
             n_facts += 1
             covered_facts += any(
@@ -42,7 +47,7 @@ def evaluate_localization(queries, results):
                 for uid, box in alternatives
             )
         for uid in result["ranking"]:
-            truth = query["gt_boxes"].get(uid)
+            truth = truth_by_page.get(uid)
             if not truth:
                 continue
             predicted = predictions.get(uid, [])
