@@ -1,9 +1,11 @@
+"""Shared helpers for dataset adapters, retrieval and reranking."""
+
 import argparse
 import json
 from collections import deque
 from contextlib import contextmanager
-from itertools import groupby, islice
 from io import BytesIO
+from itertools import groupby, islice
 from math import isfinite
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -12,6 +14,7 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE_SIZE = {"shortest_edge": 4 * 32 * 32, "longest_edge": 1800 * 32 * 32}
+RENDER_DPI = 144
 
 
 def positive_int(value):
@@ -29,11 +32,12 @@ def local_options(cli):
 def local_device(device):
     import torch
 
+    cuda_available = torch.cuda.is_available()
     if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.bfloat16
-    if device == "cuda" and not torch.cuda.is_bf16_supported():
-        dtype = torch.float16
+        device = "cuda" if cuda_available else "cpu"
+    if device == "cuda" and not cuda_available:
+        raise RuntimeError("CUDA is unavailable. Install a CUDA PyTorch build or use --device cpu.")
+    dtype = torch.float16 if device == "cuda" and not torch.cuda.is_bf16_supported() else torch.bfloat16
     return torch.device(device), dtype
 
 
@@ -65,8 +69,10 @@ def candidate_span(query):
 
 
 def group_candidates(queries):
-    by_span = sorted(queries, key=lambda query: query["cand_span"])
-    for _, group in groupby(by_span, key=lambda query: query["cand_span"]):
+    def span(query):
+        return query["cand_span"]
+
+    for _, group in groupby(sorted(queries, key=span), key=span):
         yield list(group)
 
 
@@ -77,7 +83,7 @@ def rerank_document_inputs(images, queries, rankings):
         ids = {uid for query in group for uid in rankings[query["qid"]]}
         by_id = dict(islice(source, len(ids)))
         if by_id.keys() != ids:
-            raise ValueError("Candidate images do not match document pages")
+            raise ValueError(f"Candidate images do not match the pages for document span {group[0]['cand_span']}")
         for query in group:
             yield query, [by_id[uid] for uid in rankings[query["qid"]]]
 
@@ -129,12 +135,33 @@ def embeddings_path(args):
     return args.embeddings or retrieval_dir(args) / "encode" / "embeddings.npz"
 
 
+def archive_selection(args):
+    directory = args.dataset or ROOT / "data" / args.dataset_name
+    return [dataset_folder(args).as_posix(), str(directory.resolve()), args.embedding_model_name]
+
+
+def query_key(query):
+    fields = ("query", "cand_span", "source_qid", "doc_id")
+    return json.dumps([query.get(field) for field in fields], ensure_ascii=False)
+
+
 def embedding_folder(model_name):
     return "Qwen3VLEmb8B" if model_name == "Qwen3-VL-Embedding-8B" else model_name
 
 
 def retrieval_dir(args):
-    return args.output / "retriever" / dataset_folder(args) / embedding_folder(args.embedding_model_name)
+    return args.output / "retriever" / experiment_folder(args)
+
+
+def experiment_folder(args):
+    return dataset_folder(args) / embedding_folder(args.embedding_model_name)
+
+
+def results_dir(args, artifact_dir):
+    output = args.output.resolve()
+    default_output = ROOT / "output"
+    experiment = output.relative_to(default_output) if output.is_relative_to(default_output) else Path(output.name)
+    return ROOT / "results" / experiment / artifact_dir.relative_to(args.output)
 
 
 def dataset_folder(args):

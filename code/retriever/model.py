@@ -1,3 +1,5 @@
+"""Local embedding model wrappers."""
+
 from utils import IMAGE_SIZE, local_device
 
 MAX_LENGTH = 8192
@@ -60,7 +62,7 @@ class JinaEmbeddingsV4:
         device, dtype = local_device(device)
         self.model = AutoModel.from_pretrained(
             str(model_path.resolve()), local_files_only=True, trust_remote_code=True,
-            torch_dtype=dtype, attn_implementation="sdpa", use_safetensors=True,
+            dtype=dtype, attn_implementation="sdpa", use_safetensors=True,
         ).to(device).eval()
 
     def encode_batch(self, items, role):
@@ -74,38 +76,8 @@ class JinaEmbeddingsV4:
         return self.torch.stack(vectors).detach().float().cpu().numpy()
 
 
-class WeMMEmbedding:
-    def __init__(self, model_path, device):
-        import torch
-        from qwen_vl_utils import process_vision_info
-        from transformers import AutoModel, AutoProcessor
-
-        self.torch = torch
-        self.process_vision_info = process_vision_info
-        self.device, dtype = local_device(device)
-        options = {"local_files_only": True, "trust_remote_code": True}
-        self.processor = AutoProcessor.from_pretrained(model_path, **options)
-        self.model = AutoModel.from_pretrained(
-            model_path, dtype=dtype, use_safetensors=True, **options,
-        ).to(self.device).eval()
-
-    def encode_batch(self, items, role):
-        messages = [[{"role": "user", "content": [item]}] for item in items]
-        texts = [
-            self.processor.apply_chat_template(chat, tokenize=False, add_generation_prompt=False)
-            for chat in messages
-        ]
-        images, _ = self.process_vision_info(messages, image_patch_size=16)
-        inputs = self.processor(
-            text=texts, images=images, padding=True, padding_side="right", return_tensors="pt",
-        ).to(self.device)
-        with self.torch.inference_mode():
-            return self.model.embedding(**inputs, use_cache=False).float().cpu().numpy()
-
-
 DEFAULT_EMBEDDER = "Qwen3-VL-Embedding-8B"
 EMBEDDERS = {
     DEFAULT_EMBEDDER: Qwen3VLEmbedding,
     "jina-embeddings-v4": JinaEmbeddingsV4,
-    "WeMM-Embedding-9B": WeMMEmbedding,
 }

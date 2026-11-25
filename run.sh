@@ -1,73 +1,37 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
-export PYTHONPATH="$PWD/code${PYTHONPATH:+:$PYTHONPATH}"
 
-# ============================== mmdocir ==============================
+usage() {
+  cat <<'HELP'
+Usage: bash run.sh <command> [options]
 
-# # Qwen3-VL-Embedding-8B
-# python -m retriever.encode --dataset-name mmdocir --embedding-model-name Qwen3-VL-Embedding-8B --batch-size 8
-# python -m retriever.search --dataset-name mmdocir --embedding-model-name Qwen3-VL-Embedding-8B --fusion sigmoid-zscore --grid-search --topk 50
-# python -m reranker.pointwise --dataset-name mmdocir --embedding-model-name Qwen3-VL-Embedding-8B --reranker-model-name Qwen3-VL-Reranker-8B --topk 10 --batch-size 8
-# python -m reranker.pointwise --dataset-name mmdocir --embedding-model-name Qwen3-VL-Embedding-8B --reranker-model-name jina-reranker-m0 --topk 10 --batch-size 8
-# python -m reranker.listwise --dataset-name mmdocir --embedding-model-name Qwen3-VL-Embedding-8B --topk 10
+  encode     Encode queries and pages with Qwen3-VL-Embedding-8B
+  retrieve   Retrieve candidate pages from saved embeddings
+  pointwise  Rerank with Qwen3-VL-Reranker-8B
+  serve      Start the local Qwen3.8-27B-FP8 service
+  listwise   Rerank candidates with the local FP8 service
+  rerank     Dispatch to pointwise or listwise
 
-# # jina-embeddings-v4
-# python -m retriever.encode --dataset-name mmdocir --embedding-model-name jina-embeddings-v4 --batch-size 8
-# python -m retriever.search --dataset-name mmdocir --embedding-model-name jina-embeddings-v4 --fusion sigmoid-zscore --grid-search --topk 50
-# python -m reranker.pointwise --dataset-name mmdocir --embedding-model-name jina-embeddings-v4 --reranker-model-name Qwen3-VL-Reranker-8B --topk 10 --batch-size 8
-# python -m reranker.pointwise --dataset-name mmdocir --embedding-model-name jina-embeddings-v4 --reranker-model-name jina-reranker-m0 --topk 10 --batch-size 8
-# python -m reranker.listwise --dataset-name mmdocir --embedding-model-name jina-embeddings-v4 --topk 10
+Run a command with --help for its options. The default dataset is mmdocir.
+HELP
+}
 
-# # WeMM-Embedding-9B
-# python -m retriever.encode --dataset-name mmdocir --embedding-model-name WeMM-Embedding-9B --batch-size 8
-# python -m retriever.search --dataset-name mmdocir --embedding-model-name WeMM-Embedding-9B --fusion sigmoid-zscore --grid-search --topk 50
-# python -m reranker.pointwise --dataset-name mmdocir --embedding-model-name WeMM-Embedding-9B --reranker-model-name Qwen3-VL-Reranker-8B --topk 10 --batch-size 8
-# python -m reranker.pointwise --dataset-name mmdocir --embedding-model-name WeMM-Embedding-9B --reranker-model-name jina-reranker-m0 --topk 10 --batch-size 8
-# python -m reranker.listwise --dataset-name mmdocir --embedding-model-name WeMM-Embedding-9B --topk 10
-
-# ============================== docscope ==============================
-
-# # Qwen3-VL-Embedding-8B
-# python -m retriever.encode --dataset-name docscope --split test --embedding-model-name Qwen3-VL-Embedding-8B --batch-size 8
-# python -m retriever.search --dataset-name docscope --split test --embedding-model-name Qwen3-VL-Embedding-8B --fusion sigmoid-zscore --grid-search --topk 50
-# python -m reranker.pointwise --dataset-name docscope --split test --embedding-model-name Qwen3-VL-Embedding-8B --reranker-model-name Qwen3-VL-Reranker-8B --topk 10 --batch-size 8
-# python -m reranker.pointwise --dataset-name docscope --split test --embedding-model-name Qwen3-VL-Embedding-8B --reranker-model-name jina-reranker-m0 --topk 10 --batch-size 8
-# python -m reranker.listwise --dataset-name docscope --split test --embedding-model-name Qwen3-VL-Embedding-8B --topk 10
-
-# # jina-embeddings-v4
-# python -m retriever.encode --dataset-name docscope --split test --embedding-model-name jina-embeddings-v4 --batch-size 8
-# python -m retriever.search --dataset-name docscope --split test --embedding-model-name jina-embeddings-v4 --fusion sigmoid-zscore --grid-search --topk 50
-# python -m reranker.pointwise --dataset-name docscope --split test --embedding-model-name jina-embeddings-v4 --reranker-model-name Qwen3-VL-Reranker-8B --topk 10 --batch-size 8
-# python -m reranker.pointwise --dataset-name docscope --split test --embedding-model-name jina-embeddings-v4 --reranker-model-name jina-reranker-m0 --topk 10 --batch-size 8
-# python -m reranker.listwise --dataset-name docscope --split test --embedding-model-name jina-embeddings-v4 --topk 10
-
-# # WeMM-Embedding-9B
-# python -m retriever.encode --dataset-name docscope --split test --embedding-model-name WeMM-Embedding-9B --batch-size 8
-# python -m retriever.search --dataset-name docscope --split test --embedding-model-name WeMM-Embedding-9B --fusion sigmoid-zscore --grid-search --topk 50
-# python -m reranker.pointwise --dataset-name docscope --split test --embedding-model-name WeMM-Embedding-9B --reranker-model-name Qwen3-VL-Reranker-8B --topk 10 --batch-size 8
-# python -m reranker.pointwise --dataset-name docscope --split test --embedding-model-name WeMM-Embedding-9B --reranker-model-name jina-reranker-m0 --topk 10 --batch-size 8
-# python -m reranker.listwise --dataset-name docscope --split test --embedding-model-name WeMM-Embedding-9B --topk 10
-
-# ============================== longdocurl ==============================
-
-# # Qwen3-VL-Embedding-8B
-python -m retriever.encode --dataset-name longdocurl --embedding-model-name Qwen3-VL-Embedding-8B --batch-size 8
-python -m retriever.search --dataset-name longdocurl --embedding-model-name Qwen3-VL-Embedding-8B --fusion sigmoid-zscore --grid-search --topk 50
-# python -m reranker.pointwise --dataset-name longdocurl --embedding-model-name Qwen3-VL-Embedding-8B --reranker-model-name Qwen3-VL-Reranker-8B --topk 10 --batch-size 8
-# python -m reranker.pointwise --dataset-name longdocurl --embedding-model-name Qwen3-VL-Embedding-8B --reranker-model-name jina-reranker-m0 --topk 10 --batch-size 8
-# python -m reranker.listwise --dataset-name longdocurl --embedding-model-name Qwen3-VL-Embedding-8B --topk 10
-
-# # jina-embeddings-v4
-# python -m retriever.encode --dataset-name longdocurl --embedding-model-name jina-embeddings-v4 --batch-size 8
-# python -m retriever.search --dataset-name longdocurl --embedding-model-name jina-embeddings-v4 --fusion sigmoid-zscore --grid-search --topk 50
-# python -m reranker.pointwise --dataset-name longdocurl --embedding-model-name jina-embeddings-v4 --reranker-model-name Qwen3-VL-Reranker-8B --topk 10 --batch-size 8
-# python -m reranker.pointwise --dataset-name longdocurl --embedding-model-name jina-embeddings-v4 --reranker-model-name jina-reranker-m0 --topk 10 --batch-size 8
-# python -m reranker.listwise --dataset-name longdocurl --embedding-model-name jina-embeddings-v4 --topk 10
-
-# # WeMM-Embedding-9B
-# python -m retriever.encode --dataset-name longdocurl --embedding-model-name WeMM-Embedding-9B --batch-size 8
-# python -m retriever.search --dataset-name longdocurl --embedding-model-name WeMM-Embedding-9B --fusion sigmoid-zscore --grid-search --topk 50
-# python -m reranker.pointwise --dataset-name longdocurl --embedding-model-name WeMM-Embedding-9B --reranker-model-name Qwen3-VL-Reranker-8B --topk 10 --batch-size 8
-# python -m reranker.pointwise --dataset-name longdocurl --embedding-model-name WeMM-Embedding-9B --reranker-model-name jina-reranker-m0 --topk 10 --batch-size 8
-# python -m reranker.listwise --dataset-name longdocurl --embedding-model-name WeMM-Embedding-9B --topk 10
+command="${1:-help}"
+if (( $# > 0 )); then
+  shift
+fi
+case "$command" in
+  encode)    exec bash code/retriever/run_encode.sh "$@" ;;
+  retrieve)  exec bash code/retriever/run_retrieve.sh "$@" ;;
+  pointwise) exec bash code/reranker/run_pointwise.sh "$@" ;;
+  serve)     exec bash code/reranker/run_listwise.sh serve "$@" ;;
+  listwise)  exec bash code/reranker/run_listwise.sh "$@" ;;
+  rerank)    exec bash code/reranker/run_rerank.sh "$@" ;;
+  help|-h|--help) usage ;;
+  *)
+    printf 'Unknown command: %s\n' "$command" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

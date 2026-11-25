@@ -1,3 +1,5 @@
+"""LongDocURL dataset adapter."""
+
 import re
 import tarfile
 from collections import defaultdict
@@ -7,11 +9,12 @@ from shutil import copyfileobj
 
 import pymupdf
 
-from utils import atomic_output, candidate_span, normalize_box, read_jsonl, report_progress, rerank_document_inputs
+from utils import (
+    RENDER_DPI, atomic_output, candidate_span, normalize_box, read_jsonl, report_progress,
+)
 
 
 ANNOTATIONS = ("LongDocURL_public_with_subtask_category.jsonl", "LongDocURL_public.jsonl")
-RENDER_DPI = 144
 BOX = re.compile(r"<box>\s*([^<>]*?)\s*</box>", re.IGNORECASE)
 PAGE_BEFORE_BOX = re.compile(r"\bpage\s+(\d+)\s*[:(]?\s*$", re.IGNORECASE)
 PAGE_AFTER_BOX = re.compile(r"\s*(?:,\s*|on\s+)page\s+(\d+)\b", re.IGNORECASE)
@@ -42,10 +45,10 @@ class LongDocURL:
             total = item["total_pages"]
             if re.fullmatch(r"[0-9]{7}", doc_id) is None or type(total) is not int or total < 1:
                 raise ValueError(f"Invalid LongDocURL document metadata: {doc_id}")
-            start, end = documents.get(doc_id, (next_uid, next_uid + total))
             if doc_id not in documents:
-                documents[doc_id] = start, end
-                next_uid = end
+                documents[doc_id] = next_uid, next_uid + total
+                next_uid += total
+            start, end = documents[doc_id]
             if end - start != total:
                 raise ValueError(f"Inconsistent LongDocURL page count: {doc_id}")
 
@@ -90,7 +93,7 @@ class LongDocURL:
             if len(cited) != 1 or not cited <= pages:
                 continue
             coords = match[1]
-            if coords.startswith("(") and coords.endswith(")") or coords.startswith("[") and coords.endswith("]"):
+            if coords and (coords[0], coords[-1]) in (("(", ")"), ("[", "]")):
                 coords = coords[1:-1]
             try:
                 box = normalize_box(tuple(float(value) for value in coords.split(",")), (1, 1))
@@ -101,8 +104,9 @@ class LongDocURL:
                 page_boxes[uid].add(box)
         return {uid: sorted(boxes) for uid, boxes in page_boxes.items()}
 
-    def prepare_pdfs(self, doc_ids):
-        pending = {f"{doc_id}.pdf" for doc_id in doc_ids if not (self.pdf_dir / f"{doc_id}.pdf").is_file()}
+    def prepare_pdfs(self, documents):
+        """Extract missing PDFs listed in a documents mapping from the local archive."""
+        pending = {f"{doc_id}.pdf" for doc_id in documents if not (self.pdf_dir / f"{doc_id}.pdf").is_file()}
         if pending and self.archive.is_file():
             count = len(pending)
             label = f"Extracting LongDocURL PDFs from {self.archive.name}"
@@ -138,8 +142,6 @@ class LongDocURL:
 
     def images(self, ids):
         pending = set(ids)
-        if not pending:
-            return
         selected = {}
         for doc_id, (start, end) in self.documents.items():
             pages = pending.intersection(range(start, end))
@@ -154,6 +156,3 @@ class LongDocURL:
                 for uid in pages:
                     image = document[uid - start].get_pixmap(dpi=RENDER_DPI, alpha=False, annots=False)
                     yield uid, image.tobytes("jpeg", jpg_quality=90)
-
-    def rerank_inputs(self, queries, rankings):
-        return rerank_document_inputs(self.images, queries, rankings)

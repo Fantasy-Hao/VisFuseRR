@@ -5,7 +5,23 @@ from retriever.metrics import evaluate as evaluate_ranking
 
 def evaluate(queries, before, results):
     after = {row["qid"]: row["ranking"] for row in results}
-    return {"before": evaluate_ranking(queries, before), "after": evaluate_ranking(queries, after)}
+    if len(after) != len(results) or after.keys() != before.keys():
+        raise ValueError("Rerank results must contain one row per query")
+    for qid, ranking in after.items():
+        baseline = before[qid]
+        if len(ranking) != len(baseline) or set(ranking) != set(baseline):
+            raise ValueError(f"Reranking changed the candidate set for query {qid}")
+    fallback = sum("api_error" in row for row in results)
+    return {
+        "before": evaluate_ranking(queries, before),
+        "after": evaluate_ranking(queries, after),
+        "run": {
+            "total_queries": len(results),
+            "reranked_queries": len(results) - fallback,
+            "fallback_queries": fallback,
+            "repaired_rankings": sum(bool(row.get("ranking_repaired")) for row in results),
+        },
+    }
 
 
 def box_area(box):

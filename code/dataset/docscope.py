@@ -1,13 +1,15 @@
+"""DocScope dataset adapter."""
+
 import json
 from collections import defaultdict
+from contextlib import contextmanager
 
 import pymupdf
 
-from utils import candidate_span, normalize_box, report_progress, rerank_document_inputs
+from utils import RENDER_DPI, candidate_span, normalize_box, report_progress
 
 
 SPLITS = ("dev", "test", "test-unseen", "all")
-RENDER_DPI = 144
 
 
 class DocScope:
@@ -31,16 +33,17 @@ class DocScope:
             raise ValueError(f"No answerable DocScope queries in split {split}")
         self.documents = {}
 
+    @contextmanager
     def open_pdf(self, doc_id):
-        document = pymupdf.open(self.pdf_dir / f"{doc_id.removesuffix('.pdf')}.pdf")
-        catalog = document.pdf_catalog()
-        if (
-            document.xref_get_key(catalog, "OCProperties/OCGs")[0] == "array"
-            and document.xref_get_key(catalog, "OCProperties/D")[0] == "null"
-        ):
-            # Match MuPDF's fallback for missing layer configuration.
-            document.xref_set_key(catalog, "OCProperties/D", "<< /BaseState /ON >>")
-        return document
+        with pymupdf.open(self.pdf_dir / f"{doc_id.removesuffix('.pdf')}.pdf") as document:
+            catalog = document.pdf_catalog()
+            if (
+                document.xref_get_key(catalog, "OCProperties/OCGs")[0] == "array"
+                and document.xref_get_key(catalog, "OCProperties/D")[0] == "null"
+            ):
+                # Match MuPDF's fallback for missing layer configuration.
+                document.xref_set_key(catalog, "OCProperties/D", "<< /BaseState /ON >>")
+            yield document
 
     def load(self, limit=None, *, include_ocr=False, include_layouts=False):
         docs = defaultdict(list)
@@ -101,7 +104,9 @@ class DocScope:
 
         facts = []
         for fact in item["facts"]:
-            evidence_ids = fact.get("evidence_local_ids") or [fact["evidence_local_id"]]
+            evidence_ids = fact.get("evidence_local_ids")
+            if evidence_ids is None:
+                evidence_ids = [fact["evidence_local_id"]] if "evidence_local_id" in fact else []
             alternatives = {by_id[label] for label in evidence_ids if label in by_id}
             if alternatives:
                 facts.append(sorted(alternatives))
@@ -121,6 +126,3 @@ class DocScope:
                 break
         if pending:
             raise IndexError("Image page UID outside the loaded DocScope documents")
-
-    def rerank_inputs(self, queries, rankings):
-        return rerank_document_inputs(self.images, queries, rankings)

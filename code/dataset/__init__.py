@@ -1,7 +1,10 @@
+"""Dataset adapters."""
+
 import argparse
 from pathlib import Path
 
 from utils import ROOT, positive_int
+
 from .docscope import DocScope, SPLITS
 from .longdocurl import LongDocURL
 from .mmdocir import MMDocIR
@@ -16,7 +19,7 @@ def parser(description):
     cli.add_argument("--dataset", type=Path, help="Override the local dataset directory")
     cli.add_argument("--split", choices=SPLITS, help="DocScope split (default: test)")
     cli.add_argument("--limit", type=positive_int, help="Use the first N queries")
-    cli.add_argument("--output", type=Path, default=ROOT / "output")
+    cli.add_argument("--output", type=Path, default=ROOT / "output", help="Inference output directory")
     return cli
 
 

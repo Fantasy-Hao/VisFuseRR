@@ -6,7 +6,7 @@
 
 | --dataset-name | 默认目录与输入 | 评测标注 |
 |---|---|---|
-| `mmdocir` | `data/mmdocir/MMDocIR_annotations.jsonl` 和 `MMDocIR_pages.parquet` | 证据页、区域框 |
+| `mmdocir` | `data/mmdocir/MMDocIR_annotations.jsonl`、`MMDocIR_pages.parquet`，定位评估另读取 `MMDocIR_layouts.parquet` | 证据页、区域框 |
 | `docscope` | `data/docscope/benchmark.json` 和 `pdfs/` | 可回答查询的证据页、区域框、事实证据 |
 | `longdocurl` | `data/longdocurl/` 下的 `LongDocURL_public_with_subtask_category.jsonl` 或 `LongDocURL_public.jsonl`，以及 `pdfs/` 或 `pdf_files.tar.gz` | 非空证据页，及可可靠映射到页面的区域框 |
 
@@ -14,37 +14,56 @@
 
 ## 编码、检索和重排
 
-在项目根目录设置模块搜索路径。
-
-```bash
-export PYTHONPATH="$PWD/code"
-```
-
-```powershell
-$env:PYTHONPATH = "$PWD/code"
-```
-
-下面以 LongDocURL 和 Qwen 模型为例。将模型权重放入 `model/<模型名>/`，也可用 `--embedding-model` 或 `--reranker-model` 指定本地目录。
+环境要求 Python 3.10 或更高（代码使用 `zip(..., strict=True)`）。在项目根目录运行以下命令。脚本会设置模块搜索路径。直接调用 Python 时，可先设置 `PYTHONPATH="$PWD/code"`，再运行 `python -m retriever.encode` 等模块入口。将 Qwen3-VL-Embedding-8B 和 Qwen3-VL-Reranker-8B 的权重放入 `model/<模型名>/`。可用 `--embedding-model` 或 `--reranker-model` 指定本地目录。
 
 ```bash
 python -m pip install -r requirements-qwen.txt
-python -m retriever.encode --dataset-name longdocurl
-python -m retriever.search --dataset-name longdocurl --fusion sigmoid-zscore --alpha 0.60 --topk 50
-python -m reranker.pointwise --dataset-name longdocurl --topk 10
-python -m reranker.listwise --dataset-name longdocurl --topk 10
+bash run.sh encode --dataset-name mmdocir
+bash run.sh retrieve --dataset-name mmdocir --fusion sigmoid-zscore --alpha 0.60 --topk 50
+bash run.sh rerank pointwise --dataset-name mmdocir --topk 10
 ```
 
-最后一条命令需要在环境变量或根目录的 `.env` 中设置 `SILICONFLOW_API_KEY`。可用 `SILICONFLOW_MODEL`、`SILICONFLOW_BASE_URL` 或 `--model` 配置服务与模型。
-
-- 改用其他数据集时，给各阶段传入相同的 `--dataset-name` 和适用的 `--split`、`--dataset`、`--limit`。快速检查可用 `--limit 2 --output output/smoke`。
-- 编码器可通过 `--embedding-model-name` 选择 `Qwen3-VL-Embedding-8B`、`jina-embeddings-v4` 或 `WeMM-Embedding-9B`，对应 `requirements-qwen.txt`、`requirements-jina.txt` 和 `requirements-wemm.txt`。检索和重排使用同一编码器名以找到对应产物。
-- 逐点模型通过 `--reranker-model-name` 选择 `Qwen3-VL-Reranker-8B` 或 `jina-reranker-m0`。不同模型的依赖版本有差异，可分别安装在对应的虚拟环境。
+- `bash run.sh --help` 显示各阶段入口。`bash run.sh pointwise` 和 `bash run.sh rerank pointwise` 运行同一流程；`bash run.sh rerank` 省略方法时默认 pointwise。
+- 改用其他数据集时，给各阶段传入相同的 `--dataset-name` 和适用的 `--split`、`--dataset`、`--limit`。快速检查可给各阶段加 `--limit 2 --output output/smoke`，评估文件会写到 `results/smoke/`。
 - 用 `--alpha 0`、`--alpha 1` 分别跑文本和图像单路。`--grid-search` 在本次选择的查询上拟合全局图像权重，独立评测时使用预先选定的 `--alpha`。
+
+## 本地 Listwise 重排
+
+在 Linux 服务器上准备完整的 `Qwen/Qwen3.8-27B-FP8` 权重，放在 `model/Qwen3.8-27B-FP8/`。若权重放在项目根目录的 `Qwen3.8-27B-FP8/`，脚本也会识别。用独立的 Python 环境安装 vLLM，避免和编码、逐点重排环境的 PyTorch 版本冲突。下面以支持 CUDA 13.0 的 NVIDIA 驱动为例。[官方 FP8 权重](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) · [vLLM GPU 安装文档](https://docs.vllm.ai/en/v0.34.0/getting_started/installation/gpu/) · [Qwen3.8-27B 部署文档](https://recipes.vllm.ai/Qwen/Qwen3.8-27B)
+
+```bash
+python3.12 -m venv .venv-listwise
+source .venv-listwise/bin/activate
+python -m pip install -r requirements-server.txt \
+  --extra-index-url https://download.pytorch.org/whl/cu130
+vllm download-kernels
+CUDA_VISIBLE_DEVICES=0 bash run.sh serve
+```
+
+服务脚本按单张 RTX PRO 6000 96 GB 配置。vLLM 从检查点识别 FP8 量化，计算 dtype 为 BF16。上下文上限为 131,072 token，默认 2 条并发，每条最多 10 张图，显存利用率为 0.90。可用 `QWEN38_MODEL_DIR` 和 `QWEN38_PORT` 指定路径和端口。
+
+服务就绪后，在同一台服务器的另一个终端激活原项目环境，用已有检索产物运行重排。以下命令先跑 3 条，确认正常后可省略 `--limit`。
+
+```bash
+bash run.sh listwise --dataset-name mmdocir --topk 10 --limit 3 \
+  --candidates output/retriever/mmdocir/Qwen3VLEmb8B/retrieval/topk_candidates.jsonl \
+  --output output/listwise-local-smoke
+```
+
+客户端只连接本机回环地址，默认使用 `http://127.0.0.1:8000/v1`。自定义端口时传 `--base-url`。默认提交完整 OCR 和原尺寸页面图像。思考预算为 32,768 token，最终答案预留 16,384 token，生成总预算为 49,152 token，可给输入预留 81,920 token。预算可由 `--thinking-budget` 和 `--max-tokens` 调整。读取超时默认 1,800 秒，可用 `--read-timeout` 修改。
+
+每条结果记录 `finish_reason`、`usage`、请求耗时和排序是否修补。达到生成上限的结果回退到原检索序。排序指标包含回退结果，`metrics_rerank.json` 的 `run` 字段单独统计实际完成重排、回退和排序修补的查询数量。模型加载和上下文限制由 vLLM 处理。
 
 ## 产物与指标
 
-- `output/retriever/` 保存嵌入、`topk_candidates.jsonl` 和 `metrics_retrieval.json`。重复运行同一数据集和编码器会覆盖对应的检索产物，消融对照可为每组指定独立的 `--output`。
-- `output/reranker/` 保存重排结果和前后对照指标。`Hit@K` 表示至少命中一个证据页，`Recall@K` 表示命中的证据页比例，`RecallAll@K` 表示命中全部证据页。固定 Top-10 候选后，重排只改变页的次序。
-- 列表式重排另保存 `metrics_localization.json`。`IoU@0.5` 在召回且带有效框的标注页上计算，`end_to_end_IoU@0.5` 将未召回的标注页计为失败。DocScope 另报 `fact_coverage@0.5`，每条事实命中至少一个可接受的区域即记为覆盖。
+| 阶段 | `output/` 推理产物 | `results/` 评估产物 |
+|---|---|---|
+| 编码 | `retriever/<数据集>/<编码器>/encode/embeddings.npz` | — |
+| 检索 | `retriever/<数据集>/<编码器>/retrieval/topk_candidates.jsonl` | 同级相对目录下的 `metrics_retrieval.json`，开启网格搜索时另有 `gridsearch.json` |
+| 重排 | `reranker/<数据集>/<编码器>/rerank/<方式>/<模型>/rerank_scores.jsonl` | 同级相对目录下的 `metrics_rerank.json`，Listwise 另有 `metrics_localization.json` |
 
-历史 MMDocIR 实验见[报告索引](report/README.md)。
+`--output output/<实验名>` 对应 `results/<实验名>`。其他输出路径以其目录名在 `results/` 下建立子目录。重复运行同一配置会覆盖对应文件，做对照时可给每组指定独立的 `--output`。
+
+`Hit@K` 表示至少命中一个证据页，`Recall@K` 表示命中的证据页比例，`RecallAll@K` 表示命中全部证据页。`IoU@0.5` 在召回且带有效框的标注页上计算，`end_to_end_IoU@0.5` 将未召回的标注页计为失败。DocScope 另报 `fact_coverage@0.5`，每条事实命中至少一个可接受的区域即记为覆盖。
+
+历史 MMDocIR 实验见[报告索引](report/README.md)。报告记录当时的 API 实现与自适应加权等实验；当前 CLI 使用本地权重和全局图像权重，不包含这些历史功能。
