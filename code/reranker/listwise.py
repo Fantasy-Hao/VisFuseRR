@@ -2,6 +2,8 @@ import base64
 import json
 import os
 import re
+from time import perf_counter
+from uuid import uuid4
 from functools import partial
 from io import BytesIO
 
@@ -13,7 +15,9 @@ from utils import ROOT, open_rgb, positive_int
 from reranker.rerank import rerank, rerank_parser
 
 MODEL = "Qwen/Qwen3.8-27B"
-API_TIMEOUT = 300
+READ_TIMEOUT = 300
+THINKING_BUDGET = 8192
+MAX_OUTPUT_TOKENS = 8192
 EVIDENCE_TYPES = ("table", "chart", "figure", "text", "formula", "other")
 SYSTEM_PROMPT = (
     "Compare all candidate document pages in one list and rank them by how well they "
@@ -130,6 +134,7 @@ def legalize_output(answer, page_ids):
 def rank_pages(
     client, model, query, page_ids, images, texts, *,
     max_ocr_chars=None, max_image_side=None,
+    thinking_budget=THINKING_BUDGET, max_tokens=MAX_OUTPUT_TOKENS,
 ):
     content = listwise_content(
         query, images, texts, max_ocr_chars=max_ocr_chars, max_image_side=max_image_side,
@@ -141,21 +146,29 @@ def rank_pages(
             {"role": "user", "content": content},
         ],
         "temperature": 0,
-        "max_tokens": 8192,
+        "max_tokens": max_tokens,
         "enable_thinking": True,
-        "thinking_budget": 8192,
+        "thinking_budget": thinking_budget,
     }
+    request_id = uuid4().hex
+    response = None
+    started = perf_counter()
     try:
-        response = client.post("chat/completions", json=payload)
+        response = client.post("chat/completions", json=payload, headers={"X-Trace-Id": request_id})
         response.raise_for_status()
         choice = response.json()["choices"][0]
         answer = choice["message"]["content"]
         result = legalize_output(answer, page_ids)
     except (httpx.HTTPError, ValueError, IndexError, KeyError, TypeError) as error:
-        return {**legalize_output("", page_ids), "api_error": str(error)}
-    result["finish_reason"] = choice.get("finish_reason")
-    if result["ranking_source"] == "retrieval":
-        result["api_error"] = "Completion has no usable ranking"
+        result = {**legalize_output("", page_ids), "api_error": str(error), "api_error_type": type(error).__name__}
+    else:
+        result["finish_reason"] = choice.get("finish_reason")
+        if result["ranking_source"] == "retrieval":
+            result["api_error"] = "Completion has no usable ranking"
+    result["request_seconds"] = round(perf_counter() - started, 3)
+    result["request_id"] = request_id
+    if response is not None and (trace_id := response.headers.get("x-siliconcloud-trace-id")):
+        result["trace_id"] = trace_id
     return result
 
 
@@ -164,22 +177,38 @@ def main(argv=None):
     cli.add_argument("--model", help=f"Override SILICONFLOW_MODEL (default: {MODEL})")
     cli.add_argument("--workers", type=positive_int, default=4, help="Concurrent API requests")
     cli.add_argument(
+        "--read-timeout", type=positive_int, default=READ_TIMEOUT,
+        help=f"Seconds to wait for response data (default: {READ_TIMEOUT})",
+    )
+    cli.add_argument(
+        "--thinking-budget", type=positive_int, default=THINKING_BUDGET,
+        help=f"Reasoning token budget (default: {THINKING_BUDGET})",
+    )
+    cli.add_argument(
+        "--max-tokens", type=positive_int, default=MAX_OUTPUT_TOKENS,
+        help=f"Final output token budget (default: {MAX_OUTPUT_TOKENS})",
+    )
+    cli.add_argument(
         "--max-ocr-chars", type=positive_int, help="OCR characters per page (default: full text)",
     )
     cli.add_argument(
         "--max-image-side", type=positive_int, help="Longest page image side in pixels (default: original size)",
     )
     args = cli.parse_args(argv)
+    if not 128 <= args.thinking_budget <= 32768:
+        cli.error("--thinking-budget must be between 128 and 32768")
     load_dotenv(ROOT / ".env")
     api_key = os.getenv("SILICONFLOW_API_KEY")
     if not api_key:
         cli.error("Set SILICONFLOW_API_KEY in the environment or .env")
     base_url = os.getenv("SILICONFLOW_BASE_URL") or "https://api.siliconflow.cn/v1"
     model = args.model or os.getenv("SILICONFLOW_MODEL") or MODEL
-    with httpx.Client(base_url=base_url, headers={"Authorization": f"Bearer {api_key}"}, timeout=API_TIMEOUT) as client:
+    timeout = httpx.Timeout(READ_TIMEOUT, read=args.read_timeout)
+    with httpx.Client(base_url=base_url, headers={"Authorization": f"Bearer {api_key}"}, timeout=timeout) as client:
         rank = partial(
             rank_pages, client, model, max_ocr_chars=args.max_ocr_chars,
             max_image_side=args.max_image_side,
+            thinking_budget=args.thinking_budget, max_tokens=args.max_tokens,
         )
         rerank(args, rank, method="listwise", model_name=model, workers=args.workers)
 
