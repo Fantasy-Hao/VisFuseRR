@@ -51,29 +51,22 @@ def _candidate_rankings(dataset, queries, path, topk):
     return rankings
 
 
-def rerank(args, rerank_pages, *, method, model_name, workers=1):
+def rerank(args, open_ranker, *, method, model_name, workers=1):
     from dataset import dataset_from_args
     from .metrics import evaluate, evaluate_localization
 
     path = args.candidates or retrieval_dir(args) / "retrieval" / "topk_candidates.jsonl"
     if not path.is_file():
         raise FileNotFoundError(f"Missing retrieval candidates at {path}. Run bash run.sh retrieve first.")
-    dest = args.output / "reranker" / experiment_folder(args) / "rerank" / method / quote(model_name, safe="")
-    metrics_dest = results_dir(args, dest)
+    output_dir = args.output / "reranker" / experiment_folder(args) / "rerank" / method / quote(model_name, safe="")
+    metrics_dir = results_dir(args, output_dir)
     dataset = dataset_from_args(args)
-    listwise = method == "listwise"
-    queries, texts = dataset.load(args.limit, include_ocr=listwise, include_layouts=listwise)
+    is_listwise = method == "listwise"
+    queries, texts = dataset.load(args.limit, include_ocr=is_listwise, include_layouts=is_listwise)
     if not queries:
         raise ValueError("No queries selected for reranking")
     print(f"Loading retrieval candidates from {path}", flush=True)
     before = _candidate_rankings(dataset, queries, path, args.topk)
-
-    def rank_query(item):
-        query, images = item
-        qid = query["qid"]
-        ids = before[qid]
-        page_texts = [texts[uid] for uid in ids] if listwise else None
-        return {"qid": qid, **rerank_pages(query["query"], ids, images, page_texts)}
 
     label = f"{method.capitalize()} reranking queries"
     count = len(queries)
@@ -86,20 +79,28 @@ def rerank(args, rerank_pages, *, method, model_name, workers=1):
             results.append(result)
             report_progress(label, completed, count, every=10)
 
-    if workers == 1:
-        collect(map(rank_query, inputs))
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            collect(parallel_map(executor, rank_query, inputs, workers))
+    with open_ranker(output_dir) as rank_pages:
+        def rank_query(item):
+            query, images = item
+            qid = query["qid"]
+            ids = before[qid]
+            page_texts = [texts[uid] for uid in ids] if is_listwise else None
+            return {"qid": qid, **rank_pages(query["query"], ids, images, page_texts)}
+
+        if workers == 1:
+            collect(map(rank_query, inputs))
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                collect(parallel_map(executor, rank_query, inputs, workers))
 
     results.sort(key=lambda row: row["qid"])
     metrics = evaluate(queries, before, results)
     failures = metrics["run"]["fallback_queries"]
-    write_json(dest / "rerank_scores.jsonl", results, jsonl=True)
-    write_json(metrics_dest / "metrics_rerank.json", metrics)
-    if listwise:
-        write_json(metrics_dest / "metrics_localization.json", evaluate_localization(queries, results))
-    print(f"Saved reranking metrics to {metrics_dest}", flush=True)
+    write_json(output_dir / "rerank_scores.jsonl", results, jsonl=True)
+    write_json(metrics_dir / "metrics_rerank.json", metrics)
+    if is_listwise:
+        write_json(metrics_dir / "metrics_localization.json", evaluate_localization(queries, results))
+    print(f"Saved reranking metrics to {metrics_dir}", flush=True)
     if failures:
         print(f"API fallback to retrieval order: {failures}/{len(results)} queries", flush=True)
     if failures == len(results):

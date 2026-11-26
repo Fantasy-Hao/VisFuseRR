@@ -54,6 +54,8 @@ bash run.sh listwise --dataset-name mmdocir --topk 10 --limit 3 \
 
 每条结果记录 `finish_reason`、`usage`、请求耗时和排序是否修补。达到生成上限的结果回退到原检索序。排序指标包含回退结果，`metrics_rerank.json` 的 `run` 字段单独统计实际完成重排、回退和排序修补的查询数量。模型加载和上下文限制由 vLLM 处理。
 
+Listwise 默认支持断点续跑。每条成功的响应会立即写入重排输出目录下的 `checkpoint.sqlite3`。中断后在服务可用时重跑原命令并保留同一个 `--output`，程序会复用相同输入和推理参数的结果，重试失败或未完成的查询。全部处理完后会重新生成 `rerank_scores.jsonl` 和评估指标。更换后端权重或需要全新实验时，使用新的 `--output`，并通过 `--candidates` 指向已有候选文件。
+
 ## 产物与指标
 
 | 阶段 | `output/` 推理产物 | `results/` 评估产物 |

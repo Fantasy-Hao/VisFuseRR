@@ -4,6 +4,7 @@ import base64
 import json
 import re
 from contextlib import contextmanager
+from hashlib import sha256
 from io import BytesIO
 from time import perf_counter
 from urllib.parse import urlsplit
@@ -111,6 +112,7 @@ class Qwen38Listwise:
     THINKING_BUDGET = 32768
     MAX_OUTPUT_TOKENS = 16384
     MAX_CANDIDATES = 10
+    Checkpoint_VERSION = 1
 
     _EVIDENCE_TYPES = ("table", "chart", "figure", "text", "formula", "other")
     _SYSTEM_PROMPT = (
@@ -161,7 +163,7 @@ class Qwen38Listwise:
         with httpx.Client(base_url=base_url, timeout=timeout, trust_env=False) as client:
             yield cls(client, **options)
 
-    def rank_pages(self, query, page_ids, images, texts):
+    def rank_pages(self, query, page_ids, images, texts, *, checkpoint=None):
         payload = {
             "model": self.NAME,
             "messages": [
@@ -174,6 +176,21 @@ class Qwen38Listwise:
             "thinking_token_budget": self.thinking_budget,
             "include_reasoning": False,
         }
+        if checkpoint is None:
+            return self._request_ranking(payload, page_ids)
+
+        request = [self.Checkpoint_VERSION, str(self.client.base_url), page_ids, payload]
+        key = sha256(json.dumps(request, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+        cached = checkpoint.get(key)
+        if cached is not None:
+            return cached
+
+        result = self._request_ranking(payload, page_ids)
+        if "api_error" not in result:
+            checkpoint.save(key, result)
+        return result
+
+    def _request_ranking(self, payload, page_ids):
         started = perf_counter()
         try:
             response = self.client.post("chat/completions", json=payload)
